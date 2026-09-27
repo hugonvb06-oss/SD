@@ -65,8 +65,8 @@ public class BaseDatos{
                                     " | Estado: " + estado);
             }
 
-            stmt.close();
             rs.close();
+            stmt.close();
         }catch(SQLException e){
             System.out.println("Error al consultar WS: "+
                                 e.getMessage());
@@ -85,7 +85,7 @@ public class BaseDatos{
             ps.setInt(1, id);
             ps.setString(2, ubi);
             ps.setString(3, "");
-            ps.setString(4, "ACTIVA");
+            ps.setString(4, "ACTIVADA");
             ps.setDouble(5, 0.0);
 
             ps.executeUpdate();
@@ -113,9 +113,6 @@ public class BaseDatos{
                 System.out.println("Ultima conexion: " + rs.getString("ultima_conexion"));
                 System.out.println("Estado: " + rs.getString("estado"));
                 System.out.println("Cantidad de agua: " + rs.getDouble("cant_agua"));
-
-                rs.close();
-                ps.close();
                 ok = true;
             }
 
@@ -134,7 +131,7 @@ public class BaseDatos{
         String sql = "UPDATE WS SET estado = ? WHERE id_ws = ?";
         boolean ok = false;
         try{
-            PreparedStatement ps = conection.prepareStatement(sql);
+            PreparedStatement ps = conexion.prepareStatement(sql);
             ps.setString(1, estado);
             ps.setInt(2, id);
 
@@ -145,8 +142,31 @@ public class BaseDatos{
                 ok = true;
             }
 
-        }catch(){
+        }catch(SQLException e){
             System.out.println("Error al actualizar: "+ e.getMessage());
+            ok = false;
+        }
+        return ok;
+    }
+
+    /* */
+    public boolean actualizarAguaWS(int id, double cantidad){
+        String sql = "UPDATE WS SET cant_agua = ? WHERE id_ws = ?";
+        boolean ok=false;
+        try{
+            PreparedStatement ps = conexion.prepareStatement(sql);
+            ps.setDouble(1, cantidad);
+            ps.setInt(2, id);
+
+            int filas = ps.executeUpdate();
+            ps.close();
+            if(filas > 0){
+                ok =true;
+            }else{
+                ok=false;
+            }
+        }catch(SQLException e){
+            System.out.println("Error al actualizar la cantidad: " + e.getMessage());
             ok = false;
         }
         return ok;
