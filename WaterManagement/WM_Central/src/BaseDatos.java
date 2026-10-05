@@ -85,7 +85,7 @@ public class BaseDatos{
             ps.setInt(1, id);
             ps.setString(2, ubi);
             ps.setString(3, "");
-            ps.setString(4, "ACTIVADA");
+            ps.setString(4, "DESCONECTADA");
             ps.setDouble(5, 0.0);
 
             ps.executeUpdate();
@@ -170,6 +170,18 @@ public class BaseDatos{
             ok = false;
         }
         return ok;
+    }
+
+    public void desconectarTodasWS() {
+        String sql = "UPDATE WS SET estado = 'DESCONECTADA'";
+        try {
+            PreparedStatement ps = conexion.prepareStatement(sql);
+            ps.executeUpdate();
+            ps.close();
+            System.out.println("Todas las WS han sido marcadas como DESCONECTADA");
+        } catch (SQLException e) {
+            System.out.println("Error al actualizar las WS: " + e.getMessage());
+        }
     }
 
 }

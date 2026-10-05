@@ -10,6 +10,8 @@ public class ServidorCentral {
 
         try {
             BaseDatos db =new BaseDatos("../../database/watermanagement.db");
+            db.desconectarTodasWS();
+            db.mostrarWS();
             ServerSocket servidor = new ServerSocket(puerto);
 
             System.out.println("Servidor Central iniciado");
