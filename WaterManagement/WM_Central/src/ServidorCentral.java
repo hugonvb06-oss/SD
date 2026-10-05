@@ -1,22 +1,28 @@
+import java.io.IOException;
+import java.net.ServerSocket;
+import java.net.Socket;
 
-public class ServidorCentral{
+public class ServidorCentral {
 
-    public static void main(String[] args){
-        BaseDatos db = new BaseDatos("../../database/watermanagement.db");
-        /*
-        if(db.registrarWS(1, "Ontur, Castilla la mancha")){
-            System.out.println("Ingresado correctamente");
-        }else{
-            System.out.println("Fallo de ingreso 100%perdido");
-        }*/
+    public static void main(String[] args) {
 
-       // db.mostrarWS();
-        if (db.buscarWS(1)) {
-            System.out.println("La estación existe");
-        } else {
-            System.out.println("La estación no existe");
+        int puerto = 5000;
+
+        try {
+            BaseDatos db =new BaseDatos("../../database/watermanagement.db");
+            ServerSocket servidor = new ServerSocket(puerto);
+
+            System.out.println("Servidor Central iniciado");
+            System.out.println("Esperando conexiones...");
+            while (true) {
+                Socket socket = servidor.accept();
+                System.out.println("Cliente conectado");
+                HiloCentral hilo = new HiloCentral(socket, db);
+
+                hilo.start();
+            }
+        } catch (IOException e) {
+            System.out.println("Error en el ServidorCentral: "+ e.getMessage());
         }
-        db.cerrar(); 
     }
-
 }
