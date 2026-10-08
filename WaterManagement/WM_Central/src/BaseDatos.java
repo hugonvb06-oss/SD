@@ -184,4 +184,46 @@ public class BaseDatos{
         }
     }
 
+    public boolean registrarOperario(int id, String nombre){
+        String sql = "INSERT INTO Operario (id_operario, nombre) VALUES (?, ?)";
+        boolean ok;
+
+        try{
+            PreparedStatement ps = conexion.prepareStatement(sql);
+            ps.setInt(1, id);
+            ps.setString(2, nombre);
+            ps.executeUpdate();
+            ps.close();
+            ok = true;
+        }catch(SQLException e){
+            System.out.println("Error al registrar operario: " + e.getMessage());
+            ok = false;
+        }
+        return ok;
+    }
+
+    public boolean buscarOperario(int id){
+        String sql = "SELECT * FROM Operario WHERE id_operario = ?";
+        boolean ok = false;
+
+        try{
+            PreparedStatement ps = conexion.prepareStatement(sql);
+            ps.setInt(1, id);
+            ResultSet rs = ps.executeQuery();
+            if(rs.next()){
+                System.out.println("Operario encontrado");
+                System.out.println("ID: " + rs.getInt("id_operario"));
+                System.out.println("Nombre: " + rs.getString("nombre"));
+                ok = true;
+            }
+            rs.close();
+            ps.close();
+        }catch(SQLException e){
+            System.out.println("Error al buscar operario: " + e.getMessage());
+            ok = false;
+        }
+        return ok;
+    }
+
+
 }
