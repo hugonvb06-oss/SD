@@ -132,21 +132,21 @@ public class HiloCentral extends Thread {
     // Procesar mensaje recibido
     // ========================================================
 
-    private void procesarMensaje( String mensaje, BufferedOutputStream salida) throws IOException {
-
+    private void procesarMensaje(String mensaje, BufferedOutputStream salida) throws IOException {
         String[] campos = mensaje.split("#");
+
         if (campos.length == 0) {
-            enviarStatus(salida, false, "Mensaje vacío");
+            enviarStatus(salida, false, "Mensaje vacio");
             return;
         }
 
-        // --------------------------------------------
+        // ========================================================
         // REGISTRO#ID#UBICACION
-        // --------------------------------------------
+        // ========================================================
 
         if (campos[0].equals("REGISTRO")) {
             if (campos.length != 3) {
-                enviarStatus(salida,false,"Formato de registro incorrecto");
+                enviarStatus(salida, false, "Formato de registro incorrecto");
                 return;
             }
 
@@ -154,28 +154,69 @@ public class HiloCentral extends Thread {
             try {
                 id = Integer.parseInt(campos[1]);
             } catch (NumberFormatException e) {
-                enviarStatus(salida,false,"ID incorrecto");
+                enviarStatus(salida, false, "ID incorrecto");
                 return;
             }
 
             String ubicacion = campos[2];
             System.out.println("Registro de WS recibido:");
-
             System.out.println("ID: " + id);
+            System.out.println("Ubicacion: " + ubicacion);
 
-            System.out.println("Ubicación: " + ubicacion);
-
-            // Registramos la WS en la BD
             boolean registrado = db.registrarWS(id, ubicacion);
-
             if (registrado) {
-                enviarStatus(salida,true,"Estacion registrada correctamente");
+                enviarStatus(salida, true, "Estacion registrada correctamente");
             } else {
-                enviarStatus(salida,false,"No se pudo registrar la estacion");
+                enviarStatus(salida, false, "No se pudo registrar la estacion");
             }
 
-        } else {
-            enviarStatus(salida,false,"Operacion desconocida");
+        }
+
+        // ========================================================
+        // AUTENTICACION#ID
+        // ========================================================
+
+        else if (campos[0].equals("AUTENTICACION")) {
+            if (campos.length != 2) {
+                enviarStatus(salida, false, "Formato de autenticacion incorrecto");
+                return;
+            }
+
+            int id;
+            try {
+                id = Integer.parseInt(campos[1]);
+            } catch (NumberFormatException e) {
+                enviarStatus(salida, false, "ID incorrecto");
+                return;
+            }
+
+            System.out.println("Solicitud de autenticacion recibida");
+            System.out.println("ID de WS: " + id);
+
+            // Comprobamos si la WS esta registrada en la BD
+            boolean existe = db.buscarWS(id);
+            if (existe) {
+                // La WS ha conectado con CENTRAL,
+                // por lo que deja de estar DESCONECTADA.
+                boolean actualizada = db.actualizarEstadoWS(id, "ACTIVA");
+                if (actualizada) {
+                    enviarStatus(salida, true, "WS autenticada correctamente");
+                } else {
+                    enviarStatus(salida, false, "No se pudo actualizar el estado de la WS");
+                }
+
+            } else {
+                enviarStatus(salida, false, "WS no registrada");
+            }
+        }
+
+        // ========================================================
+        // OPERACION DESCONOCIDA
+        // ========================================================
+
+        else {
+            enviarStatus(salida, false, "Operacion desconocida");
+
         }
     }
 
