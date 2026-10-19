@@ -1,4 +1,7 @@
-
+import java.io.*;
+import java.util.*;
+import java.time.Duration;
+import org.apache.kafka.common.TopicPartition;
 import java.net.ServerSocket;
 import java.net.Socket;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
@@ -7,17 +10,19 @@ import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 public class WM_WS_E {
-
-	public static String ID = "";
-	public static void averia(Socket p_sk, Socket p_skEngine)
-	{
-		WM_WS_M.escribeSocket(p_sk, "\u0005"+"#AVERIA#"+p_averia);
+	private static int  particion = 0;
+	private static String ID = "";
+	private static String ubicacion = "";
+	private static String caudal = "";
+	public static void averia(KafkaConsumer<String, String> kafka, Socket p_skMonitorSocket){
+		escribeSocket(p_skMonitorSocket, "\u0005"+"#AVERIA#");
 		String respuesta = "";
-		respuesta = WM_WS_M.leeSocket(p_sk, respuesta);
+		respuesta = WM_WS_M.leeSocket(p_skMonitorSocket, respuesta);
 		if (respuesta.equals("\u0006"))
 			System.out.println("Averia enviada correctamente");
 		else
 			System.out.println("Error al enviar averia");
+		
 	}
 	static public String leeSocket (Socket p_sk, String p_Datos)
 	{
@@ -35,27 +40,22 @@ public class WM_WS_E {
       return p_Datos;
 	}
 	
-	public static KafkaConsumer<String, String> crearKafka(String ip, int puerto, int particion) {
-
-    Properties props = new Properties();
-
-    props.put("bootstrap.servers", ip + ":" + puerto);
-    props.put("group.id", "grupo-java-" + ID);
-    props.put("key.deserializer", StringDeserializer.class.getName());
-    props.put("value.deserializer", StringDeserializer.class.getName());
-    props.put("enable.auto.commit", "false");
-    props.put("auto.offset.reset", "earliest");
-	
-    KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
-
-    consumer.assign(Collections.singletonList(
-            new TopicPartition("mi-topico", particion)));
-
-    return consumer;
-}
+	public static KafkaConsumer<String, String> crearKafka(String ip, int puerto) {
+		Properties props = new Properties();
+		props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, ip + ":" + puerto);
+		props.put(ConsumerConfig.GROUP_ID_CONFIG, "grupo-java-" + ID);
+		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+		props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		
+		KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
+		consumer.assign(Collections.singletonList(new TopicPartition("mi-topico", particion)));
+		return consumer;
+	}
 
 public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer) {
-    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(1000));
+    ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(0));
 
     ArrayList<String> mensajes = new ArrayList<>();
     for (ConsumerRecord<String, String> record : records) {
@@ -76,9 +76,12 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 	{
 		try
 		{
+			if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
+            	mensajeFinal = lrc("\u0002" + p_Datos + "\u0003");
+        	}
 			OutputStream aux = p_sk.getOutputStream();
 			DataOutputStream flujo= new DataOutputStream( aux );
-			flujo.writeUTF(p_Datos);      
+			flujo.writeUTF(mensajeFinal);      
 		}
 		catch (Exception e)
 		{
@@ -90,16 +93,14 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 	{
 		String validar ="";
 		validar =leeSocket(p_sk, validar);
-		
-		if (validar.contains("Invalido")){
-			System.out.println("Error: No se pudo conectar con la central");
-            System.exit(-1);
-		}
 		while (!validaLrc(validar)){
 			System.out.println("Error: LRC invalido");
 			escribeSocket(p_sk, "\u0015");
 			validar =leeSocket(p_sk, validar);
 		}
+		ID = validar.split("#ID#")[1].split("#")[0];
+		ubicacion = validar.split("#UBICACION#")[1].split("#")[0];
+		caudal = validar.split("#CAUDAL#")[1].split("#")[0];
 		escribeSocket(p_sk, "\u0006");
 	}
 	public static String lrc(String p_datos)
@@ -113,13 +114,21 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
     }
 	public static boolean validaLrc(String p_datos)
 	{
-        byte[] bytes = p_datos.getBytes();
-		
-        int lrc = 0;
-        for (byte b : bytes) {
-            lrc ^= b;
-        }
-        return lrc == 0;
+        if (p_tramaRecibida == null || p_tramaRecibida.length() < 2) return false;
+
+    	
+		int longitud = p_tramaRecibida.length();
+		String cuerpo = p_tramaRecibida.substring(0, longitud - 1);
+		char lrcRecibido = p_tramaRecibida.charAt(longitud - 1);
+
+		// Recalcular el LRC del cuerpo
+		byte[] bytes = cuerpo.getBytes();
+		int lrcCalculado = 0;
+		for (byte b : bytes) {
+			lrcCalculado ^= b;
+		}
+
+    return lrcCalculado == (int) lrcRecibido;
     }
 	static public void EsperaRiego(KafkaConsumer<String, String> kafka, Socket Monitor)
 	{
@@ -128,12 +137,12 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 		{
 			while(!riegoActivo)
 			{
-				ArrayList<String> mensajes = leerKafka(kafka, ID);
+				ArrayList<String> mensajes = leerKafka(kafka);
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("RIEGO_ACTIVO")) {
 						riegoActivo = true;
 						System.out.println("Riego activo");
-						escribeSocket(Monitor, "\u0005"+"#riego#");
+						escribeSocket(Monitor, mensaje);
 					}
 				}
 			}
@@ -144,20 +153,29 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 		}
 	  return;
 	}
-	static public void regando(KafkaConsumer<String, String> kafka, Socket Monitor, int tiempoRiego)
+	static public void regando(KafkaConsumer<String, String> kafka, Socket Monitor, long tiempoRiego)
 	{
+		String datos = "";
 		boolean riegoActivo = true;
+		long tiempoInicio = System.currentTimeMillis();
 		try
 		{
 			while(riegoActivo)
 			{
-				ArrayList<String> mensajes = leerKafka(kafka, ID);
+				ArrayList<String> mensajes = leerKafka(kafka);
+				leeSocket(Monitor, datos);
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("AVERIA")) {
 						riegoActivo = false;
-						System.out.println("Riego inactivo");
-						escribeSocket(Monitor, "\u0005"+"#riego_inactivo#");
+						escribeSocket(Monitor, "#KO#");
 					}
+				}
+				if (System.currentTimeMillis() - tiempoInicio >= tiempoRiego&&tiempoRiego>0) {
+					riegoActivo = false;
+					escribeSocket(Monitor, "#riego_finalizado_correctamente#");
+				}
+				if(riegoActivo){
+					escribeSocket(Monitor, "#ESTADO#riego_activo#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*Float.parseFloat(caudal)/1000);
 				}
 			}
 		}
@@ -189,12 +207,12 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 		    
 		    ipMonitor = args[2];
             puertoMonitor = args[3];
-			Socket skMonitor = new Socket(Integer.parseInt(puertoMonitor), ipMonitor);
+			Socket skMonitor = new Socket(ipMonitor, Integer.parseInt(puertoMonitor));
 		    ValidarId(skMonitor);
 			while(true)
 			{
 				EsperaRiego(kafka, skMonitor);
-
+				regando(kafka, skMonitor, 10000);
 			}
 			/*
 			* Mantenemos la comunicacion con el cliente

@@ -1,3 +1,4 @@
+import java.net.ServerSocket;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.io.BufferedReader;
@@ -18,6 +19,8 @@ public class WM_WS_M {
 	static private String ipCentral;
     static private String puertoCentral; 
     static private String id;
+    static private String ubicacion;
+    static private String caudal;
 	static public String leeSocket (Socket p_sk, String p_Datos)
 	{
 		try
@@ -41,9 +44,12 @@ public class WM_WS_M {
 	{
 		try
 		{
+            if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
+            	mensajeFinal = lrc("\u0002" + p_Datos + "\u0003");
+        	}
 			OutputStream aux = p_sk.getOutputStream();
 			DataOutputStream flujo= new DataOutputStream( aux );
-			flujo.writeUTF(p_Datos);      
+			flujo.writeUTF(mensajeFinal);      
 		}
 		catch (Exception e)
 		{
@@ -56,6 +62,7 @@ public class WM_WS_M {
 	
 	public static Socket conectaSocket ( String p_ip, String p_puerto)
     {
+        Socket p_sk = null;
         try
         {
             p_sk = new Socket(p_ip, Integer.parseInt(p_puerto));
@@ -68,10 +75,20 @@ public class WM_WS_M {
       return p_sk;
     }
 	
-	public static boolean validaId(String p_id, Socket p_sk)
+	public static boolean validaId( Socket p_sk)
     {
         String respuesta = "";
-        escribeSocket(p_sk, "\u0005"+"#ID#"+p_id);
+        escribeSocket(p_sk, "#ID#"+id+"#UBICACION#"+ubicacion);
+        respuesta = leeSocket(p_sk, respuesta);
+        if (respuesta.equals("\u0006"))
+            return true;
+        else
+            return false;
+    }
+    public static boolean transmiteId(Socket p_sk)
+    {
+        String respuesta = "";
+        escribeSocket(p_sk, "#ID#"+id+"#UBICACION#"+ubicacion+"#CAUDAL#"+caudal);
         respuesta = leeSocket(p_sk, respuesta);
         if (respuesta.equals("\u0006"))
             return true;
@@ -93,19 +110,20 @@ public class WM_WS_M {
         float tiempoRiego = 0;
         BlockingQueue<String> colaMensajes = new ArrayBlockingQueue<>( 100);
         HiloMonitor hiloMonitor = new HiloMonitor(skEngine, colaMensajes);
-        boolean riegoActivo = false;
-        while(rieagoActivo)
+        boolean riegoActivo = true;
+        while(riegoActivo)
         {
             try {
-                escribeSocket(skEngine, lrc("\u0002"+"#DATOS#\u0003"));
+                escribeSocket(skEngine, lrc("#DATOS?#"));
                 colaMensajes.put("Esperando");
                 // 1000 milisegundos equivalen a 1 segundo
                 Thread.sleep(1000);
                 datos = colaMensajes.poll();
                 if(datos == null || datos.contains("KO")) {
-                    averia(skEngine, central);
+                    riegoActivo = false;
+                    averia(central,skEngine);
                 }else{
-                    escribeSocket(central, lrc("\u0005"+"#ESTADO_RIEGO#"+datos));
+                    escribeSocket(central, datos);
                 }
             } catch (InterruptedException e) {
                 // Se ejecuta si otro hilo interrumpe la pausa
@@ -137,13 +155,15 @@ public class WM_WS_M {
     }
 	public static void averia(Socket p_sk, Socket p_skEngine)
     {
-        escribeSocket(p_sk, "\u0005"+"#AVERIA#"+p_averia);
+        escribeSocket(p_sk, "#AVERIA#");
         String respuesta = "";
         respuesta = leeSocket(p_sk, respuesta);
-        if (respuesta.equals("\u0006"))
-            System.out.println("Averia enviada correctamente");
-        else
-            System.out.println("Error al enviar averia");
+        while(respuesta.equals("\u0006")){
+            escribeSocket(p_sk, "#AVERIA#");
+        
+            respuesta = leeSocket(p_sk, respuesta);
+        }
+            
     }
 	
 	/**
@@ -152,27 +172,26 @@ public class WM_WS_M {
 	public static void main(String[] args) {
 		int i = 0;
 		
-		if (args.length < 4) {
-			System.out.println ("Debe indicar la direccion del servidor y el puerto");
-			System.out.println ("$./Cliente nombre_servidor puerto_servidor");
+		if (args.length < 6) {
 			System.exit(-1);
 		}
-		puertoServidor = args[0];
+		String puertoServidor = args[0];
 		ipCentral = args[1];
         puertoCentral = args[2];
         id = args[3];
+        ubicacion = args[4];
+        caudal = args[5];
 		Socket central = conectaSocket(ipCentral, puertoCentral);
-        ServerSocket skServidor = new ServerSocket(Integer.parseInt(puertoServidor));
-        System.out.println("Escucho el puerto " + puerto);
-        Socket skEngine = skServidor.accept();
-        if (central == null || !validaId(id, central)) { //valida la id con el servidor central
-            escribeSocket(sk, lrc("\u0005"+"#Invalido#\u0006"));
+        if (central == null || !validaId(central)) { //valida la id con el servidor central
             System.out.println("Error: No se pudo conectar con la central");
             System.exit(-1);
         }
+        ServerSocket skServidor = new ServerSocket(Integer.parseInt(puertoServidor));
+        Socket skEngine = skServidor.accept();
+       
 
         
-        while(!validarId(id, skEngine));
+        while(!transmiteId(skEngine));
         while(true){
             esperaRiego(skEngine);
             regando(skEngine, central);
