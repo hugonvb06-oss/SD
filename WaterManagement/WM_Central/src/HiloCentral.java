@@ -1,5 +1,6 @@
 import java.io.*;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 
 public class HiloCentral extends Thread {
 
@@ -78,7 +79,7 @@ public class HiloCentral extends Thread {
                 datos.write(caracter);
             }
 
-            String mensajeDatos = new String(datos.toByteArray(), "UTF-8");
+            String mensajeDatos = new String(datos.toByteArray(), StandardCharsets.UTF_8);
 
             System.out.println(
                     "Mensaje recibido: " + mensajeDatos
@@ -116,14 +117,47 @@ public class HiloCentral extends Thread {
             salida.flush();
 
             // ------------------------------------------------
-            // 8. Procesamos el mensaje
-            // ------------------------------------------------
-
+            // 8. Procesamos el mensaje y enviamos ANSWER
+            // -------------------------------------------
             procesarMensaje(mensajeDatos, salida);
+
+            // 9. Esperamos el ACK que confirma la recepción de ANSWER
+            int confirmacion = entrada.read();
+
+            if (confirmacion != ACK) {
+                if (confirmacion == NACK) {
+                    System.out.println("El cliente ha rechazado la respuesta");
+                } else {
+                    System.out.println("No se recibió el ACK esperado");
+                }
+
+                return;
+            }
+
+            System.out.println("ACK de ANSWER recibido");
+
+            // 10. Esperamos EOT para terminar la comunicación
+            int fin = entrada.read();
+            if (fin != EOT) {
+                System.out.println("Error: no se recibió EOT");
+                return;
+            }
+            System.out.println("EOT recibido. Comunicación terminada");
             socket.close();
 
         } catch (IOException e) {
             System.out.println("Error en HiloCentral: " + e.getMessage());
+        }finally {
+            try {
+                if (socket != null && !socket.isClosed()) {
+                    socket.close();
+                    System.out.println("Socket cerrado");
+                }
+            } catch (IOException e) {
+                System.out.println(
+                    "Error al cerrar el socket: " + e.getMessage()
+                );
+            }
         }
     }
 
@@ -133,12 +167,11 @@ public class HiloCentral extends Thread {
     // ========================================================
 
     private void procesarMensaje(String mensaje, BufferedOutputStream salida) throws IOException {
-        String[] campos = mensaje.split("#");
-
-        if (campos.length == 0) {
+        if (mensaje == null || mensaje.trim().isEmpty()) {
             enviarStatus(salida, false, "Mensaje vacio");
             return;
         }
+        String[] campos = mensaje.split("#");
 
         // ========================================================
         // REGISTRO#ID#UBICACION
@@ -198,7 +231,7 @@ public class HiloCentral extends Thread {
             if (existe) {
                 // La WS ha conectado con CENTRAL,
                 // por lo que deja de estar DESCONECTADA.
-                boolean actualizada = db.actualizarEstadoWS(id, "ACTIVA");
+                boolean actualizada = db.actualizarEstadoWS(id, "ACTIVADA");
                 if (actualizada) {
                     enviarStatus(salida, true, "WS autenticada correctamente");
                 } else {
@@ -244,7 +277,7 @@ public class HiloCentral extends Thread {
     private void enviarTrama(BufferedOutputStream salida,String datos) throws IOException {
         byte lrc = calcularLRC(datos);
         salida.write(STX);
-        salida.write(datos.getBytes("UTF-8"));
+        salida.write(datos.getBytes(StandardCharsets.UTF_8));
         salida.write(ETX);
         salida.write(lrc);
         salida.flush();
@@ -257,7 +290,7 @@ public class HiloCentral extends Thread {
 
     private byte calcularLRC(String mensaje) {
         byte lrc = 0;
-        byte[] datos = mensaje.getBytes();
+        byte[] datos = mensaje.getBytes(StandardCharsets.UTF_8);
         for (byte b : datos) {
             lrc ^= b;
         }
