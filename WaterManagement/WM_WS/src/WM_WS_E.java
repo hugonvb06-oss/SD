@@ -131,7 +131,7 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 
     return lrcCalculado == (int) lrcRecibido;
     }
-	static public long EsperaRiego(KafkaConsumer<String, String> kafka, Socket Monitor)
+	static public long espera(KafkaConsumer<String, String> kafka, Socket Monitor)
 	{
 		boolean riegoActivo = false;
 		long tiempoRiego = 0;

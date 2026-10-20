@@ -5,16 +5,15 @@ import java.lang.Exception;
 import java.net.Socket;
 import java.io.*;
 
-public class HiloMonitor extends Thread {
+public class HiloWS extends Thread {
 
 	private Socket skCliente;
 	private BlockingQueue<String> colaMensajes;
 	
 
-	public HiloMonitor(Socket p_cliente, BlockingQueue<String> p_colaMensajes) {
+	public HiloWS(Socket p_cliente, BlockingQueue<String> p_colaMensajes) {
 		this.skCliente = p_cliente;
 		this.colaMensajes = p_colaMensajes;
-		this.identificador = p_identificador;
 	}
 	static public void escribeSocket (Socket p_sk, String p_Datos)
 	{
@@ -37,37 +36,34 @@ public class HiloMonitor extends Thread {
 	public void monitorizacionEngine()
     {
         String datos = "";
-        BlockingQueue<String> cola = new ArrayBlockingQueue<>( 100);
-        HiloMonitor hiloMonitor = new HiloMonitor(skCliente, cola);
-        hiloMonitor.start();
         boolean monitorActivo = true;
-        while(monitorActivo||!Thread.currentThread().isInterrupted())
-        {
-            try {
+		try {
+			while(monitorActivo&&!Thread.interrupted())
+			{
+            
                 escribeSocket(skCliente, "#DATOS?#");
-                cola.put("Esperando");
-                // 1000 milisegundos equivalen a 1 segundo
-                Thread.sleep(1000);
-                datos = cola.poll();
+                datos = leeSocket(skCliente, datos);
+				Thread.sleep(1000);
                 if(datos == null || datos.contains("KO")) {
                     monitorActivo = false;
                     colaMensajes.put("KO");
                 }else{
                     colaMensajes.put(datos);
                 }
-            } catch (InterruptedException e) {
+            
+            	System.out.println("Recibido: " + datos);
+			}
+        } catch (InterruptedException e) {
                 // Se ejecuta si otro hilo interrumpe la pausa
                 Thread.currentThread().interrupt();
                 System.err.println("El hilo fue interrumpido");
-            }
-            System.out.println("Recibido: " + datos);
         }
     }
 	public void esperaContinua(){
 		String datos = "";
 		try {
 			while(true){
-				leeSocket(skCliente, datos);
+				datos = leeSocket(skCliente, datos);
 				escribeSocket(skCliente, "\u0006");
 				colaMensajes.put(datos);
 			
@@ -124,7 +120,6 @@ public class HiloMonitor extends Thread {
 					esperaContinua();
 				}else if(Cadena.equals("Monitorea")){
 					monitorizacionEngine(); 
-					break;
 				}				
 			}
 			skCliente.close();
