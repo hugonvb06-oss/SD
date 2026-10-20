@@ -9,14 +9,75 @@ public class HiloMonitor extends Thread {
 
 	private Socket skCliente;
 	private BlockingQueue<String> colaMensajes;
+	
 
-	public HiloMonitor(Socket p_cliente, BlockingQueue<String> p_colaMensajes)
-	{
+	public HiloMonitor(Socket p_cliente, BlockingQueue<String> p_colaMensajes) {
 		this.skCliente = p_cliente;
 		this.colaMensajes = p_colaMensajes;
+		this.identificador = p_identificador;
 	}
-	
-	
+	static public void escribeSocket (Socket p_sk, String p_Datos)
+	{
+        String mensajeFinal = "";
+		try
+		{
+            if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
+            	mensajeFinal = lrc("\u0002" + p_Datos + "\u0003");
+        	}
+			OutputStream aux = p_sk.getOutputStream();
+			DataOutputStream flujo= new DataOutputStream( aux );
+			flujo.writeUTF(mensajeFinal);      
+		}
+		catch (Exception e)
+		{
+			System.out.println("Error: " + e.toString());
+		}
+		return;
+	}
+	public void monitorizacionEngine()
+    {
+        String datos = "";
+        BlockingQueue<String> cola = new ArrayBlockingQueue<>( 100);
+        HiloMonitor hiloMonitor = new HiloMonitor(skCliente, cola);
+        hiloMonitor.start();
+        boolean monitorActivo = true;
+        while(monitorActivo||!Thread.currentThread().isInterrupted())
+        {
+            try {
+                escribeSocket(skCliente, "#DATOS?#");
+                cola.put("Esperando");
+                // 1000 milisegundos equivalen a 1 segundo
+                Thread.sleep(1000);
+                datos = cola.poll();
+                if(datos == null || datos.contains("KO")) {
+                    monitorActivo = false;
+                    colaMensajes.put("KO");
+                }else{
+                    colaMensajes.put(datos);
+                }
+            } catch (InterruptedException e) {
+                // Se ejecuta si otro hilo interrumpe la pausa
+                Thread.currentThread().interrupt();
+                System.err.println("El hilo fue interrumpido");
+            }
+            System.out.println("Recibido: " + datos);
+        }
+    }
+	public void esperaContinua(){
+		String datos = "";
+		try {
+			while(true){
+				leeSocket(skCliente, datos);
+				escribeSocket(skCliente, "\u0006");
+				colaMensajes.put(datos);
+			
+			}
+		} catch (InterruptedException e) {
+			// Se ejecuta si otro hilo interrumpe la pausa
+			Thread.currentThread().interrupt();
+			System.err.println("El hilo fue interrumpido");
+		}
+	}
 	public String leeSocket (Socket p_sk, String p_Datos)
 	{
 		try
@@ -59,10 +120,12 @@ public class HiloMonitor extends Thread {
 			{
 				Cadena = esperaCola();
 				
-				if(Cadena.equals("Esperando")) {
-					Cadena = leeSocket (skCliente, Cadena);
-                    escribeCola(Cadena);
-				}					
+				if(Cadena.equals("EsperaContinua")) {
+					esperaContinua();
+				}else if(Cadena.equals("Monitorea")){
+					monitorizacionEngine(); 
+					break;
+				}				
 			}
 			skCliente.close();
 			//System.exit(0); No se debe poner esta sentencia, porque en ese caso el primer cliente que cierra rompe el socket 
