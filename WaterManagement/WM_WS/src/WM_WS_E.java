@@ -74,6 +74,7 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
     
 	static public void escribeSocket (Socket p_sk, String p_Datos)
 	{
+		String mensajeFinal = "";
 		try
 		{
 			if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
@@ -130,9 +131,10 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 
     return lrcCalculado == (int) lrcRecibido;
     }
-	static public void EsperaRiego(KafkaConsumer<String, String> kafka, Socket Monitor)
+	static public long EsperaRiego(KafkaConsumer<String, String> kafka, Socket Monitor)
 	{
 		boolean riegoActivo = false;
+		long tiempoRiego = 0;
 		try
 		{
 			while(!riegoActivo)
@@ -142,6 +144,7 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 					if (mensaje.contains("RIEGO_ACTIVO")) {
 						riegoActivo = true;
 						System.out.println("Riego activo");
+						tiempoRiego = Long.parseLong(mensaje.split("#TIEMPO#")[1].split("#")[0]);
 						escribeSocket(Monitor, mensaje);
 					}
 				}
@@ -151,7 +154,7 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 		{
 			System.out.println("Error: " + e.toString());
 		}
-	  return;
+	  return tiempoRiego;
 	}
 	static public void regando(KafkaConsumer<String, String> kafka, Socket Monitor, long tiempoRiego)
 	{
@@ -175,7 +178,7 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 					escribeSocket(Monitor, "#riego_finalizado_correctamente#");
 				}
 				if(riegoActivo){
-					escribeSocket(Monitor, "#ESTADO#riego_activo#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*Float.parseFloat(caudal)/1000);
+					escribeSocket(Monitor, "#ESTADO#riego_activo#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*Float.parseFloat(caudal)/60000);
 				}
 			}
 		}
@@ -209,10 +212,11 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
             puertoMonitor = args[3];
 			Socket skMonitor = new Socket(ipMonitor, Integer.parseInt(puertoMonitor));
 		    ValidarId(skMonitor);
+			long tiempoRiego = 0;
 			while(true)
 			{
-				EsperaRiego(kafka, skMonitor);
-				regando(kafka, skMonitor, 10000);
+				tiempoRiego = EsperaRiego(kafka, skMonitor);
+				regando(kafka, skMonitor, tiempoRiego);
 			}
 			/*
 			* Mantenemos la comunicacion con el cliente

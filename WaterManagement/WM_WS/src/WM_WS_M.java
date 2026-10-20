@@ -42,6 +42,7 @@ public class WM_WS_M {
 	*/
 	static public void escribeSocket (Socket p_sk, String p_Datos)
 	{
+        String mensajeFinal = "";
 		try
 		{
             if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
@@ -110,6 +111,7 @@ public class WM_WS_M {
         float tiempoRiego = 0;
         BlockingQueue<String> colaMensajes = new ArrayBlockingQueue<>( 100);
         HiloMonitor hiloMonitor = new HiloMonitor(skEngine, colaMensajes);
+        hiloMonitor.start();
         boolean riegoActivo = true;
         while(riegoActivo)
         {
@@ -142,10 +144,9 @@ public class WM_WS_M {
         try
         {
             String datos = "";
-            datos = leeSocket(engine, datos);
-            if(datos.contains("riego")){
-                System.out.println("Riego iniciado");
-            }
+            while(!datos.contains("RIEGO_ACTIVO"))
+                datos = leeSocket(engine, datos);
+            
         }
         catch (Exception e)
         {
@@ -181,22 +182,26 @@ public class WM_WS_M {
         id = args[3];
         ubicacion = args[4];
         caudal = args[5];
-		Socket central = conectaSocket(ipCentral, puertoCentral);
-        if (central == null || !validaId(central)) { //valida la id con el servidor central
-            System.out.println("Error: No se pudo conectar con la central");
-            System.exit(-1);
-        }
-        ServerSocket skServidor = new ServerSocket(Integer.parseInt(puertoServidor));
-        Socket skEngine = skServidor.accept();
-       
+        try {
+            Socket central = conectaSocket(ipCentral, puertoCentral);
+            if (central == null || !validaId(central)) { //valida la id con el servidor central
+                System.out.println("Error: No se pudo conectar con la central");
+                System.exit(-1);
+            }
+            ServerSocket skServidor = new ServerSocket(Integer.parseInt(puertoServidor));
+            Socket skEngine = skServidor.accept();
+        
 
-        
-        while(!transmiteId(skEngine));
-        while(true){
-            esperaRiego(skEngine);
-            regando(skEngine, central);
+            
+            while(!transmiteId(skEngine));
+            while(true){
+                esperaRiego(skEngine);
+                regando(skEngine, central);
+            }
+        }catch (Exception e) {
+            System.out.println("Error: " + e.toString());
         }
-        
+
         
         
         

@@ -59,11 +59,10 @@ public class HiloMonitor extends Thread {
 			{
 				Cadena = esperaCola();
 				
-				if(Cadena =="Esperando") {
+				if(Cadena.equals("Esperando")) {
 					Cadena = leeSocket (skCliente, Cadena);
                     escribeCola(Cadena);
-				}
-				this.escribeSocket (skCliente, Cadena);						
+				}					
 			}
 			skCliente.close();
 			//System.exit(0); No se debe poner esta sentencia, porque en ese caso el primer cliente que cierra rompe el socket 
