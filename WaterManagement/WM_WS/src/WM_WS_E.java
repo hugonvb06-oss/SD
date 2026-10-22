@@ -1,5 +1,6 @@
 import java.io.*;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
 import java.time.Duration;
 import org.apache.kafka.common.TopicPartition;
 import java.net.ServerSocket;
@@ -9,29 +10,56 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
+import java.util.concurrent.TimeUnit;
 public class WM_WS_E {
 	private static int  particion = 0;
 	private static String ID = "";
 	private static String ubicacion = "";
-	private static String caudal = "";
-	public static void averia(KafkaConsumer<String, String> kafka, Socket p_skMonitorSocket){
-		escribeSocket(p_skMonitorSocket, "\u0005"+"#AVERIA#");
-		String respuesta = "";
-		respuesta = WM_WS_M.leeSocket(p_skMonitorSocket, respuesta);
-		if (respuesta.equals("\u0006"))
-			System.out.println("Averia enviada correctamente");
-		else
-			System.out.println("Error al enviar averia");
+	private static int caudal=0;
+	private static long tiempoRiego = 0;
+	private static KafkaConsumer<String, String> kafka;
+	static private BlockingQueue<String> colaMensajesMonitor;
+    static private BlockingQueue<String> colaMensajesPantalla;
+	public static String averia(){
+		String datosMonitor;
+
+		while (true) {
+			datosMonitor = colaMensajesMonitor.take();
+			if(datosMonitor.contains("ACTIVAR")){
+				return "espera";
+			}
+		}
 		
 	}
-	static public String leeSocket (Socket p_sk, String p_Datos)
+	public static String bloqueo(){
+		String datosMonitor;
+
+		while (true) {
+			datosMonitor = colaMensajesMonitor.take();
+			if(datosMonitor.contains("ACTIVAR")){
+				return "espera";
+			}
+		}
+		
+	}
+	static public String leeSocket (Socket p_sk, String Datos)
 	{
 		try
 		{
+			String p_Datos;
 			InputStream aux = p_sk.getInputStream();
 			DataInputStream flujo = new DataInputStream( aux );
 			p_Datos = new String();
 			p_Datos = flujo.readUTF();
+			while(!validaLrc(p_Datos)){
+				escribeSocket(p_sk, "\u0015");
+				p_Datos = fujo.readUTF();
+			}
+			while(p_Datos.equals("\u0015")){
+				escribeSocket(p_sk, datos);
+				p_Datos = fujo.readUTF();
+			}
+			
 		}
 		catch (Exception e)
 		{
@@ -93,12 +121,11 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 	static public void ValidarId(Socket p_sk)
 	{
 		String validar ="";
-		validar =leeSocket(p_sk, validar);
-		while (!validaLrc(validar)){
-			System.out.println("Error: LRC invalido");
-			escribeSocket(p_sk, "\u0015");
+		while (validar==null||!validar.contains("ID")) {
 			validar =leeSocket(p_sk, validar);
 		}
+		
+		
 		ID = validar.split("#ID#")[1].split("#")[0];
 		ubicacion = validar.split("#UBICACION#")[1].split("#")[0];
 		caudal = validar.split("#CAUDAL#")[1].split("#")[0];
@@ -115,12 +142,13 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
     }
 	public static boolean validaLrc(String p_datos)
 	{
-        if (p_tramaRecibida == null || p_tramaRecibida.length() < 2) return false;
-
-    	
-		int longitud = p_tramaRecibida.length();
-		String cuerpo = p_tramaRecibida.substring(0, longitud - 1);
-		char lrcRecibido = p_tramaRecibida.charAt(longitud - 1);
+		
+        if (p_datos == null) return false;
+		if(p_datos.equals("\u0015")||p_datos.equals("\u0006")) return true;
+    	if(p_datos.length()<2)return false;
+		int longitud = p_datos.length();
+		String cuerpo = p_datos.substring(0, longitud - 1);
+		char lrcRecibido = p_datos.charAt(longitud - 1);
 
 		// Recalcular el LRC del cuerpo
 		byte[] bytes = cuerpo.getBytes();
@@ -131,61 +159,88 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 
     return lrcCalculado == (int) lrcRecibido;
     }
-	static public long espera(KafkaConsumer<String, String> kafka, Socket Monitor)
+	static public String espera(Socket Monitor)
 	{
-		boolean riegoActivo = false;
-		long tiempoRiego = 0;
+		boolean espera = true;
+		String datosMonitor;
+		String datosPantalla;
 		try
 		{
-			while(!riegoActivo)
+			while(espera)
 			{
 				ArrayList<String> mensajes = leerKafka(kafka);
+				datosMonitor = colaMensajesMonitor.poll(1, TimeUnit.SECONDS);
+				datosPantalla = colaMensajesPantalla.poll();
+				if(datosPantalla != null && datosPantalla.equals("KO")){
+					escribeSocket(Monitor, datosPantalla);
+					return "averia";
+				}else if(datosMonitor != null && datosMonitor.contains("BLOQUEO")){
+					return "bloqueo";
+				}else if(datosPantalla != null && datosPantalla.equals("RIEGO_ACTIVO")){
+					escribeSocket(Monitor, datosPantalla);
+					return "riego";
+				}else if(datosMonitor != null && datosMonitor.contains("RIEGO_ACTIVO")){
+					return "riego";
+				}
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("RIEGO_ACTIVO")) {
-						riegoActivo = true;
+						espera = true;
 						System.out.println("Riego activo");
-						tiempoRiego = Long.parseLong(mensaje.split("#TIEMPO#")[1].split("#")[0]);
+						if(mensaje.contains("#TIEMPO#")){
+							tiempoRiego = Long.parseLong(mensaje.split("#TIEMPO#")[1].split("#")[0]);
+						}
+						
 						escribeSocket(Monitor, mensaje);
+						return "riego";
 					}
 				}
+				escribeSocket(Monitor, "#ESTADO#ESPERA#");
 			}
 		}
 		catch (Exception e)
 		{
 			System.out.println("Error: " + e.toString());
 		}
-	  return tiempoRiego;
+	  return "error";
 	}
-	static public void regando(KafkaConsumer<String, String> kafka, Socket Monitor, long tiempoRiego)
+	static public String regando(Socket Monitor)
 	{
 		String datos = "";
-		boolean riegoActivo = true;
 		long tiempoInicio = System.currentTimeMillis();
 		try
 		{
-			while(riegoActivo)
+			while(true)
 			{
-				ArrayList<String> mensajes = leerKafka(kafka);
-				leeSocket(Monitor, datos);
-				for (String mensaje : mensajes) {
-					if (mensaje.contains("AVERIA")) {
-						riegoActivo = false;
-						escribeSocket(Monitor, "#KO#");
-					}
+				String datosPantalla = colaMensajesPantalla.poll();
+				String datosMonitor = colaMensajesMonitor.poll(1, TimeUnit.SECONDS);
+				if(datosPantalla != null && datosPantalla.equals("KO")){
+					escribeSocket(Monitor, datosPantalla);
+					tiempoRiego = 0;
+					return "averia";
+				}
+				if(datosMonitor != null && datosMonitor.contains("BLOQUEO")){
+					tiempoRiego = 0;
+					return "bloqueo";
+				}
+				if(datosPantalla != null && datosPantalla.equals("RIEGO_FINALIZADO")){
+					escribeSocket(Monitor, datosPantalla);
+					tiempoRiego = 0;
+					return "espera";
 				}
 				if (System.currentTimeMillis() - tiempoInicio >= tiempoRiego&&tiempoRiego>0) {
-					riegoActivo = false;
-					escribeSocket(Monitor, "#riego_finalizado_correctamente#");
-				}
-				if(riegoActivo){
-					escribeSocket(Monitor, "#ESTADO#riego_activo#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*Float.parseFloat(caudal)/60000);
-				}
+					escribeSocket(Monitor, "#RIEGO_FINALIZADO#");
+					tiempoRiego = 0;
+					return "espera";
+				}	
+				escribeSocket(Monitor, "#ESTADO#RIEGO_ACTIVO#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*Float.parseFloat(caudal)/60000);
+	
 			}
 		}
 		catch (Exception e)
 		{
 			System.out.println("Error: " + e.toString());
 		}
+		return "error";
 	}
 	public static void main(String[] args) {
 		// TODO Auto-generated method stub
@@ -206,18 +261,36 @@ public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer
 			}
 			ipBroker = args[0];
 			puertoBroker = args[1];
-			KafkaConsumer<String, String> kafka = crearKafka(ipBroker, Integer.parseInt(puertoBroker));
+			kafka = crearKafka(ipBroker, Integer.parseInt(puertoBroker));
 		    
 		    ipMonitor = args[2];
             puertoMonitor = args[3];
 			Socket skMonitor = new Socket(ipMonitor, Integer.parseInt(puertoMonitor));
 		    ValidarId(skMonitor);
+			colaMensajesMonitor = new ArrayBlockingQueue<>(100);
+            HiloWS hiloMonitor = new HiloWS(skMonitor, colaMensajesMonitor);
+            hiloMonitor.start();
+            colaMensajesMonitor.put("EsperaContinua");
+            colaMensajesPantalla = new ArrayBlockingQueue<>(100);
+            HiloWS hiloPantalla = new HiloWS(null, colaMensajesPantalla);
+            hiloPantalla.start();
+            colaMensajesPantalla.put("EsperaPantalla");
+            String datos = "espera";
 			long tiempoRiego = 0;
-			while(true)
-			{
-				tiempoRiego = EsperaRiego(kafka, skMonitor);
-				regando(kafka, skMonitor, tiempoRiego);
-			}
+			while(true){
+                if(datos.equals("espera")){
+                    datos = espera(skMonitor);
+                }else if(datos.equals("averia")) {
+                    datos = averia();
+                    colaMensajesPantalla.put("EsperaPantalla");
+                } else if(datos.equals("bloqueo")) {
+                    datos = bloqueo();
+                } else if(datos.equals("riego")) {
+                    datos = regando(skMonitor);
+                }else {
+                    System.out.println("Error en la supervisión y operación del sistema.");
+                }
+            }
 			/*
 			* Mantenemos la comunicacion con el cliente
 			*/	

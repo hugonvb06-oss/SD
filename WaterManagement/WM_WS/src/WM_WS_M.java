@@ -23,13 +23,24 @@ public class WM_WS_M {
     static private String caudal;
     static private BlockingQueue<String> colaMensajesEngine;
     static private BlockingQueue<String> colaMensajesCentral;
-	static public String leeSocket (Socket p_sk, String p_Datos)
+	static public String leeSocket (Socket p_sk, String Datos)
 	{
 		try
 		{
+			String p_Datos;
 			InputStream aux = p_sk.getInputStream();
 			DataInputStream flujo = new DataInputStream( aux );
+			p_Datos = new String();
 			p_Datos = flujo.readUTF();
+			while(!validaLrc(p_Datos)){
+				escribeSocket(p_sk, "\u0015");
+				p_Datos = fujo.readUTF();
+			}
+			while(p_Datos.equals("\u0015")){
+				escribeSocket(p_sk, datos);
+				p_Datos = fujo.readUTF();
+			}
+			
 		}
 		catch (Exception e)
 		{
@@ -87,6 +98,26 @@ public class WM_WS_M {
         else
             return false;
     }
+    
+    public static boolean validaLrc(String p_datos)
+	{
+		
+        if (p_datos == null) return false;
+		if(p_datos.equals("\u0015")||p_datos.equals("\u0006")) return true;
+    	if(p_datos.length()<2)return false;
+		int longitud = p_datos.length();
+		String cuerpo = p_datos.substring(0, longitud - 1);
+		char lrcRecibido = p_datos.charAt(longitud - 1);
+
+		// Recalcular el LRC del cuerpo
+		byte[] bytes = cuerpo.getBytes();
+		int lrcCalculado = 0;
+		for (byte b : bytes) {
+			lrcCalculado ^= b;
+		}
+
+    return lrcCalculado == (int) lrcRecibido;
+    }
     public static boolean transmiteId(Socket p_sk)
     {
         String respuesta = "";
@@ -112,23 +143,20 @@ public class WM_WS_M {
         String datosEngine = "";
         String datosCentral = "";
         float tiempoRiego = 0;
-        boolean riegoActivo = true;
         try {
-            while(riegoActivo)
+            while(true)
             {
             
                 // 1000 milisegundos equivalen a 1 segundo
                 datosEngine = colaMensajesEngine.take();
                 datosCentral = colaMensajesCentral.poll();
-                if(datosEngine.contains("KO")) {
-                    riegoActivo = false;
-                    averia(central,skEngine);
-                }else if(datosEngine.contains("RIEGO_FINALIZADO")) {
-                    riegoActivo = false;
+                if(datosEngine != null && datosEngine.contains("KO")) {
+                    return "averia";
+                }else if(datosEngine != null && datosEngine.contains("RIEGO_FINALIZADO")) {
+                    
                     escribeSocket(central, "#ESTADO#RIEGO_FINALIZADO#");
                     return "espera";
-                }else if(datosCentral != null && datosCentral.contains("BLOQUEAR")) {
-                    riegoActivo = false;
+                }else if(datosCentral != null && datosCentral.contains("BLOQUEO")) {
                     return "bloqueo";
                 }
                 escribeSocket(central, datosEngine);
@@ -138,6 +166,7 @@ public class WM_WS_M {
                 Thread.currentThread().interrupt();
                 System.err.println("El hilo fue interrumpido");
             }
+        return "error";
     }
     public static String bloqueo(Socket skEngine, Socket central){
     // 1. Ordena al Engine detener cualquier riego y bloquearse
@@ -169,21 +198,21 @@ public class WM_WS_M {
 
     try {
         while(true) {
-            // 1. Envío continuo (cada segundo) de comprobación de salud al Engine
             
-            
-            // 2. Recogida de mensajes de los hilos (Engine y Central de forma asíncrona)
             datosEngine = colaMensajesEngine.take();
             datosCentral = colaMensajesCentral.poll();
             
             // 3. Comprobación de estado de salud del Engine (Fuga / Avería / KO)
-            if (datosEngine == null || datosEngine.contains("KO")) {
+            if (datosEngine != null && datosEngine.contains("KO")) {
                 System.out.println("¡Alerta! Avería o fuga detectada en el Engine.");
                 return "averia"; // Retorna un estado de avería para que el hilo principal pueda manejarlo
             }else if (datosCentral != null && datosCentral.contains("BLOQUEAR")) {
                 System.out.println("Orden de bloqueo recibida desde Central.");
                 return "bloqueo"; // Retorna un estado de bloqueo para que el hilo principal pueda manejarlo
             }else if (datosEngine != null && datosEngine.contains("RIEGO_ACTIVO")) {
+                System.out.println("Inicio de riego detectado.");
+                return "riego"; // Retorna un estado de riego para que el hilo principal pueda manejarlo
+            }else if (datosCentral != null && datosCentral.contains("RIEGO_ACTIVO")) {
                 System.out.println("Inicio de riego detectado.");
                 return "riego"; // Retorna un estado de riego para que el hilo principal pueda manejarlo
             }

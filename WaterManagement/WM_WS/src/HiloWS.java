@@ -1,4 +1,4 @@
-
+import java.util.Scanner;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.lang.Exception;
@@ -15,6 +15,25 @@ public class HiloWS extends Thread {
 		this.skCliente = p_cliente;
 		this.colaMensajes = p_colaMensajes;
 	}
+	public static boolean validaLrc(String p_datos)
+	{
+		
+        if (p_datos == null) return false;
+		if(p_datos.equals("\u0015")||p_datos.equals("\u0006")) return true;
+    	if(p_datos.length()<2)return false;
+		int longitud = p_datos.length();
+		String cuerpo = p_datos.substring(0, longitud - 1);
+		char lrcRecibido = p_datos.charAt(longitud - 1);
+
+		// Recalcular el LRC del cuerpo
+		byte[] bytes = cuerpo.getBytes();
+		int lrcCalculado = 0;
+		for (byte b : bytes) {
+			lrcCalculado ^= b;
+		}
+
+    return lrcCalculado == (int) lrcRecibido;
+    }
 	static public void escribeSocket (Socket p_sk, String p_Datos)
 	{
         String mensajeFinal = "";
@@ -33,6 +52,15 @@ public class HiloWS extends Thread {
 		}
 		return;
 	}
+	public static String lrc(String p_datos)
+	{
+        byte[] bytes = p_datos.getBytes();
+        int lrc = 0;
+        for (byte b : bytes) {
+            lrc ^= b;
+        }
+        return p_datos+Integer.toHexString(lrc);
+    }
 	public void monitorizacionEngine()
     {
         String datos = "";
@@ -42,7 +70,7 @@ public class HiloWS extends Thread {
 			{
             
                 escribeSocket(skCliente, "#DATOS?#");
-                datos = leeSocket(skCliente, datos);
+                datos = leeSocket(skCliente, "#DATOS?#");
 				Thread.sleep(1000);
                 if(datos == null || datos.contains("KO")) {
                     monitorActivo = false;
@@ -64,7 +92,10 @@ public class HiloWS extends Thread {
 		try {
 			while(true){
 				datos = leeSocket(skCliente, datos);
-				escribeSocket(skCliente, "\u0006");
+				if(!datos.contains("Datos?")){
+					escribeSocket(skCliente, "\u0006");
+				}
+				
 				colaMensajes.put(datos);
 			
 			}
@@ -74,14 +105,48 @@ public class HiloWS extends Thread {
 			System.err.println("El hilo fue interrumpido");
 		}
 	}
-	public String leeSocket (Socket p_sk, String p_Datos)
+	public void esperaEntradaPantalla(){
+		String datos = "";
+		boolean entradaPantalla = true;
+		Scanner scanner = new Scanner(System.in); // 2. Crear el objeto Scanner
+		try {
+			while(entradaPantalla){
+				
+
+        		System.out.print("Posibles comandos: KO, RIEGO_ACTIVO, RIEGO_FINALIZADO");
+        		datos = scanner.nextLine();
+				if(datos.equals("KO")){
+					entradaPantalla = false;
+					
+					System.out.print("Averia detectada");
+				}
+				colaMensajes.put(datos);
+			
+			}
+		} catch (Exception e) {
+			// Se ejecuta si otro hilo interrumpe la pausa
+			Thread.currentThread().interrupt();
+			System.err.println("El hilo fue interrumpido");
+		}
+	}
+	static public String leeSocket (Socket p_sk, String Datos)
 	{
 		try
 		{
+			String p_Datos;
 			InputStream aux = p_sk.getInputStream();
 			DataInputStream flujo = new DataInputStream( aux );
 			p_Datos = new String();
 			p_Datos = flujo.readUTF();
+			while(!validaLrc(p_Datos)){
+				escribeSocket(p_sk, "\u0015");
+				p_Datos = fujo.readUTF();
+			}
+			while(p_Datos.equals("\u0015")){
+				escribeSocket(p_sk, datos);
+				p_Datos = fujo.readUTF();
+			}
+			
 		}
 		catch (Exception e)
 		{
@@ -120,7 +185,9 @@ public class HiloWS extends Thread {
 					esperaContinua();
 				}else if(Cadena.equals("Monitorea")){
 					monitorizacionEngine(); 
-				}				
+				}else if(Cadena.equals("EsperaPantalla")){
+					esperaEntradaPantalla();
+				}			
 			}
 			skCliente.close();
 			//System.exit(0); No se debe poner esta sentencia, porque en ese caso el primer cliente que cierra rompe el socket 
