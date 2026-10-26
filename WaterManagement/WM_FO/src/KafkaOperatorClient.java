@@ -134,7 +134,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
         if (wsId <= 0) {
             throw new IllegalArgumentException("El ID de la WS debe ser positivo.");
         }
-        if (durationSeconds <= 0 || durationSeconds > 86400) {
+        if (durationSeconds < 0 || durationSeconds > 86400) {
             throw new IllegalArgumentException("La duración debe estar entre 1 y 86400 segundos.");
         }
 

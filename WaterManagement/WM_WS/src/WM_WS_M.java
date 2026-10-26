@@ -34,11 +34,11 @@ public class WM_WS_M {
 			p_Datos = flujo.readUTF();
 			while(!validaLrc(p_Datos)){
 				escribeSocket(p_sk, "\u0015");
-				p_Datos = fujo.readUTF();
+				p_Datos = flujo.readUTF();
 			}
 			while(p_Datos.equals("\u0015")){
-				escribeSocket(p_sk, datos);
-				p_Datos = fujo.readUTF();
+				escribeSocket(p_sk, Datos);
+				p_Datos = flujo.readUTF();
 			}
 			
 		}
@@ -46,7 +46,7 @@ public class WM_WS_M {
 		{
 			System.out.println("Error: " + e.toString());
 		}
-      return p_Datos;
+      return Datos;
 	}
 
 	/*
@@ -58,7 +58,7 @@ public class WM_WS_M {
         String mensajeFinal = "";
 		try
 		{
-            if (!p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
+            if (!p_Datos.equals("\u0005") && !p_Datos.equals("\u0006") && !p_Datos.equals("\u0015")) {
             	mensajeFinal = lrc("\u0002" + p_Datos + "\u0003");
         	}
 			OutputStream aux = p_sk.getOutputStream();
@@ -90,8 +90,10 @@ public class WM_WS_M {
 	
 	public static boolean validaId( Socket p_sk)
     {
+        escribeSocket(p_sk, "\u0005");
         String respuesta = "";
-        escribeSocket(p_sk, "#ID#"+id+"#UBICACION#"+ubicacion);
+        leeSocket(p_sk, "\u0005");
+        escribeSocket(p_sk, "#ID:"+id+"#UBICACION:"+ubicacion+"#");
         respuesta = leeSocket(p_sk, respuesta);
         if (respuesta.equals("\u0006"))
             return true;
@@ -139,7 +141,7 @@ public class WM_WS_M {
     }
     public static String regando(Socket skEngine, Socket central)
     {
-        escribeSocket(central, "#ESTADO#RIEGO_ACTIVO#");
+        escribeSocket(central, "#STATUS#RIEGO_ACTIVO#");
         String datosEngine = "";
         String datosCentral = "";
         float tiempoRiego = 0;
@@ -154,10 +156,12 @@ public class WM_WS_M {
                     return "averia";
                 }else if(datosEngine != null && datosEngine.contains("RIEGO_FINALIZADO")) {
                     
-                    escribeSocket(central, "#ESTADO#RIEGO_FINALIZADO#");
+                    escribeSocket(central, "#STATUS#RIEGO_FINALIZADO#");
                     return "espera";
-                }else if(datosCentral != null && datosCentral.contains("BLOQUEO")) {
+                }else if(datosCentral != null && datosEngine.contains("BLOQUEO")) {
                     return "bloqueo";
+                }else if(datosCentral != null && datosCentral.contains("\u0004")) {
+                    return "error";
                 }
                 escribeSocket(central, datosEngine);
             }
@@ -169,27 +173,29 @@ public class WM_WS_M {
         return "error";
     }
     public static String bloqueo(Socket skEngine, Socket central){
-    // 1. Ordena al Engine detener cualquier riego y bloquearse
-    escribeSocket(skEngine, "#BLOQUEO#");
-    System.out.println("Estación en Estado NARANJA: Fuera de Servicio.");
-    boolean estaBloqueado = true;
-    
-    // Bucle estricto: Se queda aquí hasta recibir la orden contraria de la Central
-    try {
-        while (estaBloqueado) {
-            String ordenCentral = colaMensajesCentral.take();
-            if (ordenCentral != null && ordenCentral.contains("ACTIVAR")) {
-                System.out.println("Orden de activación recibida. Volviendo a estado Verde/Reposo.");
-                escribeSocket(skEngine, "#ACTIVAR#");
-                estaBloqueado = false; // Rompe el bucle de bloqueo
-            }
+        // 1. Ordena al Engine detener cualquier riego y bloquearse
+        escribeSocket(skEngine, "#BLOQUEO#");
+        System.out.println("Estación en Estado NARANJA: Fuera de Servicio.");
+        boolean estaBloqueado = true;
         
+        // Bucle estricto: Se queda aquí hasta recibir la orden contraria de la Central
+        try {
+            while (estaBloqueado) {
+                String ordenCentral = colaMensajesEngine.take();
+                String apagado = colaMensajesCentral.take();
+                if (ordenCentral != null && ordenCentral.contains("ACTIVAR")) {
+                    System.out.println("Orden de activación recibida. Volviendo a estado Verde/Reposo.");
+                    estaBloqueado = false; // Rompe el bucle de bloqueo
+                }else if(apagado != null && apagado.contains("\u0004")) {
+                    return "error";
+                }
+            
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
-    } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
+        return "espera";
     }
-    return "espera";
-}
 	public static String espera(Socket engine, Socket central) {
     String datosEngine = "";
     String datosCentral = "";
@@ -206,15 +212,14 @@ public class WM_WS_M {
             if (datosEngine != null && datosEngine.contains("KO")) {
                 System.out.println("¡Alerta! Avería o fuga detectada en el Engine.");
                 return "averia"; // Retorna un estado de avería para que el hilo principal pueda manejarlo
-            }else if (datosCentral != null && datosCentral.contains("BLOQUEAR")) {
+            }else if (datosEngine != null && datosEngine.contains("BLOQUEAR")) {
                 System.out.println("Orden de bloqueo recibida desde Central.");
                 return "bloqueo"; // Retorna un estado de bloqueo para que el hilo principal pueda manejarlo
             }else if (datosEngine != null && datosEngine.contains("RIEGO_ACTIVO")) {
                 System.out.println("Inicio de riego detectado.");
                 return "riego"; // Retorna un estado de riego para que el hilo principal pueda manejarlo
-            }else if (datosCentral != null && datosCentral.contains("RIEGO_ACTIVO")) {
-                System.out.println("Inicio de riego detectado.");
-                return "riego"; // Retorna un estado de riego para que el hilo principal pueda manejarlo
+            }else if(datosCentral != null && datosCentral.contains("\u0004")) {
+                return "error";
             }
             
         }
@@ -229,11 +234,13 @@ public class WM_WS_M {
         boolean continua = true;
         String datos = "";  
         try {
-            escribeSocket(p_sk, "#ESTADO#AVERIA#");
+            escribeSocket(p_sk, "#STATUS#AVERIA#");
             while (continua) {
-                datos = colaMensajesCentral.take(); // Espera a que la Central envíe una orden de desbloqueo
+                datos = colaMensajesEngine.take(); // Espera a que la Central envíe una orden de desbloqueo
                 if (datos.contains("ACTIVAR")) {
                     continua = false;
+                }else if(datos != null && datos.contains("\u0004")) {
+                    return "error";
                 }
             }
         } catch (InterruptedException e) {
@@ -293,8 +300,12 @@ public class WM_WS_M {
                     datos = regando(skEngine, central);
                 }else {
                     System.out.println("Error en la supervisión y operación del sistema.");
+                    escribeSocket(skEngine, "\u0004");
+                    break;
                 }
             }
+            while(hiloEngine.isAlive()) hiloEngine.interrupt();
+            while(hiloCentral.isAlive()) hiloCentral.interrupt();
         }catch (Exception e) {
             System.out.println("Error: " + e.toString());
         }

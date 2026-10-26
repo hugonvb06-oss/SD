@@ -90,7 +90,7 @@ public class HiloWS extends Thread {
 	public void esperaContinua(){
 		String datos = "";
 		try {
-			while(true){
+			while(!Thread.interrupted()){
 				datos = leeSocket(skCliente, datos);
 				if(!datos.contains("Datos?")){
 					escribeSocket(skCliente, "\u0006");
@@ -110,7 +110,7 @@ public class HiloWS extends Thread {
 		boolean entradaPantalla = true;
 		Scanner scanner = new Scanner(System.in); // 2. Crear el objeto Scanner
 		try {
-			while(entradaPantalla){
+			while(entradaPantalla&&!Thread.interrupted()){
 				
 
         		System.out.print("Posibles comandos: KO, RIEGO_ACTIVO, RIEGO_FINALIZADO");
@@ -131,20 +131,21 @@ public class HiloWS extends Thread {
 	}
 	static public String leeSocket (Socket p_sk, String Datos)
 	{
+		String p_Datos;
 		try
 		{
-			String p_Datos;
+			
 			InputStream aux = p_sk.getInputStream();
 			DataInputStream flujo = new DataInputStream( aux );
 			p_Datos = new String();
 			p_Datos = flujo.readUTF();
 			while(!validaLrc(p_Datos)){
 				escribeSocket(p_sk, "\u0015");
-				p_Datos = fujo.readUTF();
+				p_Datos = flujo.readUTF();
 			}
 			while(p_Datos.equals("\u0015")){
-				escribeSocket(p_sk, datos);
-				p_Datos = fujo.readUTF();
+				escribeSocket(p_sk, Datos);
+				p_Datos = flujo.readUTF();
 			}
 			
 		}
@@ -152,7 +153,7 @@ public class HiloWS extends Thread {
 		{
 			System.out.println("Error: " + e.toString());
 		}
-      return p_Datos;
+      return Datos;
 	}
     public String esperaCola(){
         String mensaje = "";
@@ -177,7 +178,7 @@ public class HiloWS extends Thread {
 		String Cadena="";
 		
         try {
-			while (true)
+			while (!Thread.interrupted())
 			{
 				Cadena = esperaCola();
 				
