@@ -15,13 +15,11 @@ public class WM_WS_M {
 	*	suficiente para los datos. Devuelve el numero de bytes leidos o
 	* 0 si se cierra fichero o -1 si hay error.
 	*/
-    static private String puertoServidor;
 	static private String ipCentral;
     static private String puertoCentral; 
     static private String id;
     static private String ubicacion;
     static private String caudal;
-    static private BlockingQueue<String> colaMensajesEngine;
     static private BlockingQueue<String> colaMensajesCentral;
 	static public String leeSocket (Socket p_sk, String Datos)
 	{
@@ -40,13 +38,13 @@ public class WM_WS_M {
 				escribeSocket(p_sk, Datos);
 				p_Datos = flujo.readUTF();
 			}
-			
+			return p_Datos;
 		}
 		catch (Exception e)
 		{
 			System.out.println("Error: " + e.toString());
 		}
-      return Datos;
+        return null;
 	}
 
 	/*
@@ -139,117 +137,46 @@ public class WM_WS_M {
         }
         return p_datos+Integer.toHexString(lrc);
     }
-    public static String regando(Socket skEngine, Socket central)
-    {
-        escribeSocket(central, "#STATUS#RIEGO_ACTIVO#");
-        String datosEngine = "";
-        String datosCentral = "";
-        float tiempoRiego = 0;
-        try {
-            while(true)
-            {
-            
-                // 1000 milisegundos equivalen a 1 segundo
-                datosEngine = colaMensajesEngine.take();
-                datosCentral = colaMensajesCentral.poll();
-                if(datosEngine != null && datosEngine.contains("KO")) {
-                    return "averia";
-                }else if(datosEngine != null && datosEngine.contains("RIEGO_FINALIZADO")) {
+    public static String obtenerDatos(String datos){
+        return datos.substring(2, datos.length());
+    }
+    public static void monitoreo(Socket skEngine, Socket central){
+        String datos = "";
+        String apagado = "";
+        boolean averia = false;
+		try {
+			while(true)
+			{
+                apagado = colaMensajesCentral.poll();
+                escribeSocket(skEngine, "#DATOS?#");
+                datos = leeSocket(skEngine, "#DATOS?#");
+				Thread.sleep(1000);
+                if(datos == null || datos.contains("KO") || datos.contains("AVERIA")) {
+                    if(!averia){
+                        averia = true;
+                        escribeSocket(central, "#ID#"+id+"#STATUS#AVERIA#");
+                    }
                     
-                    escribeSocket(central, "#STATUS#RIEGO_FINALIZADO#");
-                    return "espera";
-                }else if(datosCentral != null && datosEngine.contains("BLOQUEO")) {
-                    return "bloqueo";
-                }else if(datosCentral != null && datosCentral.contains("\u0004")) {
-                    return "error";
+                }else if(apagado != null && apagado.equals("\u0004")){
+                    escribeSocket(skEngine,"\u0004");
+                    leeSocket(skEngine, "\u0004");
+                    return;
+                }else if(datos!=null){
+                    averia = false;
+                    if(datos.split("#STATUS#")[1].split("#")[0].equals("RIEGO")){
+                        escribeSocket(central, "#ID#"+id+obtenerDatos(datos));
+                    }
                 }
-                escribeSocket(central, datosEngine);
-            }
+            
+            	System.out.println("Recibido: " + datos);
+			}
         } catch (InterruptedException e) {
                 // Se ejecuta si otro hilo interrumpe la pausa
                 Thread.currentThread().interrupt();
                 System.err.println("El hilo fue interrumpido");
-            }
-        return "error";
-    }
-    public static String bloqueo(Socket skEngine, Socket central){
-        // 1. Ordena al Engine detener cualquier riego y bloquearse
-        escribeSocket(skEngine, "#BLOQUEO#");
-        System.out.println("Estación en Estado NARANJA: Fuera de Servicio.");
-        boolean estaBloqueado = true;
-        
-        // Bucle estricto: Se queda aquí hasta recibir la orden contraria de la Central
-        try {
-            while (estaBloqueado) {
-                String ordenCentral = colaMensajesEngine.take();
-                String apagado = colaMensajesCentral.take();
-                if (ordenCentral != null && ordenCentral.contains("ACTIVAR")) {
-                    System.out.println("Orden de activación recibida. Volviendo a estado Verde/Reposo.");
-                    estaBloqueado = false; // Rompe el bucle de bloqueo
-                }else if(apagado != null && apagado.contains("\u0004")) {
-                    return "error";
-                }
-            
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
-        return "espera";
     }
-	public static String espera(Socket engine, Socket central) {
-    String datosEngine = "";
-    String datosCentral = "";
-    
-    
 
-    try {
-        while(true) {
-            
-            datosEngine = colaMensajesEngine.take();
-            datosCentral = colaMensajesCentral.poll();
-            
-            // 3. Comprobación de estado de salud del Engine (Fuga / Avería / KO)
-            if (datosEngine != null && datosEngine.contains("KO")) {
-                System.out.println("¡Alerta! Avería o fuga detectada en el Engine.");
-                return "averia"; // Retorna un estado de avería para que el hilo principal pueda manejarlo
-            }else if (datosEngine != null && datosEngine.contains("BLOQUEAR")) {
-                System.out.println("Orden de bloqueo recibida desde Central.");
-                return "bloqueo"; // Retorna un estado de bloqueo para que el hilo principal pueda manejarlo
-            }else if (datosEngine != null && datosEngine.contains("RIEGO_ACTIVO")) {
-                System.out.println("Inicio de riego detectado.");
-                return "riego"; // Retorna un estado de riego para que el hilo principal pueda manejarlo
-            }else if(datosCentral != null && datosCentral.contains("\u0004")) {
-                return "error";
-            }
-            
-        }
-    } catch (InterruptedException e) {
-        Thread.currentThread().interrupt();
-        System.err.println("El hilo de supervisión fue interrumpido.");
-    }
-    return "error"; // Retorna un estado de error si ocurre una interrupción
-}
-	public static String averia(Socket p_sk, Socket p_skEngine)
-    {
-        boolean continua = true;
-        String datos = "";  
-        try {
-            escribeSocket(p_sk, "#STATUS#AVERIA#");
-            while (continua) {
-                datos = colaMensajesEngine.take(); // Espera a que la Central envíe una orden de desbloqueo
-                if (datos.contains("ACTIVAR")) {
-                    continua = false;
-                }else if(datos != null && datos.contains("\u0004")) {
-                    return "error";
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.err.println("El hilo de supervisión fue interrumpido.");
-        }
-        return "espera";
-    }
-	
 	/**
 	 * @param args
 	 */
@@ -277,33 +204,15 @@ public class WM_WS_M {
             String datos = "";
             
             while(!transmiteId(skEngine));
-            colaMensajesEngine = new ArrayBlockingQueue<>(100);
-            HiloWS hiloEngine = new HiloWS(skEngine, colaMensajesEngine);
-            hiloEngine.start();
-            colaMensajesEngine.put("Monitorea");
             colaMensajesCentral = new ArrayBlockingQueue<>(100);
             HiloWS hiloCentral = new HiloWS(central, colaMensajesCentral);
             hiloCentral.start();
             colaMensajesCentral.put("EsperaContinua");
             datos = "espera";
-            while(true){
-                if(datos.equals("espera")){
-                    datos = espera(skEngine, central);
-                }else if(datos.equals("averia")) {
-                    datos = averia(central, skEngine);
-                } else if(datos.equals("bloqueo")) {
-                    datos = bloqueo(skEngine, central);
-                } else if(datos.equals("riego")) {
-                    datos = regando(skEngine, central);
-                }else {
-                    System.out.println("Error en la supervisión y operación del sistema.");
-                    escribeSocket(skEngine, "\u0004");
-                    break;
-                }
-            }
+            monitoreo(skEngine, central);
+            
             central.close();
             skEngine.close();
-            while(hiloEngine.isAlive()) hiloEngine.interrupt();
             while(hiloCentral.isAlive()) hiloCentral.interrupt();
         }catch (Exception e) {
             System.out.println("Error: " + e.toString());

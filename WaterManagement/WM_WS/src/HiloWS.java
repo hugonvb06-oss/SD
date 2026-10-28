@@ -61,32 +61,6 @@ public class HiloWS extends Thread {
         }
         return p_datos+Integer.toHexString(lrc);
     }
-	public void monitorizacionEngine()
-    {
-        String datos = "";
-        boolean monitorActivo = true;
-		try {
-			while(monitorActivo&&!Thread.interrupted())
-			{
-            
-                escribeSocket(skCliente, "#DATOS?#");
-                datos = leeSocket(skCliente, "#DATOS?#");
-				Thread.sleep(1000);
-                if(datos == null || datos.contains("KO")) {
-                    monitorActivo = false;
-                    colaMensajes.put("KO");
-                }else{
-                    colaMensajes.put(datos);
-                }
-            
-            	System.out.println("Recibido: " + datos);
-			}
-        } catch (InterruptedException e) {
-                // Se ejecuta si otro hilo interrumpe la pausa
-                Thread.currentThread().interrupt();
-                System.err.println("El hilo fue interrumpido");
-        }
-    }
 	public void esperaContinua(){
 		String datos = "";
 		try {
@@ -128,6 +102,7 @@ public class HiloWS extends Thread {
 			Thread.currentThread().interrupt();
 			System.err.println("El hilo fue interrumpido");
 		}
+		scanner.close();
 	}
 	static public String leeSocket (Socket p_sk, String Datos)
 	{
@@ -184,8 +159,6 @@ public class HiloWS extends Thread {
 				
 				if(Cadena.equals("EsperaContinua")) {
 					esperaContinua();
-				}else if(Cadena.equals("Monitorea")){
-					monitorizacionEngine(); 
 				}else if(Cadena.equals("EsperaPantalla")){
 					esperaEntradaPantalla();
 				}			

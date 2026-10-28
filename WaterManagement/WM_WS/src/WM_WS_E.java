@@ -38,10 +38,11 @@ public class WM_WS_E {
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("ACTIVAR")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Avería resuelta vía Kafka. Volviendo a estado espera.");
-						escribeSocket(Monitor, "ACTIVAR");
+						escribeSocket(Monitor, "#STATUS#ESPERA#");
 						return "espera";
 					}
 				}
+				escribeSocket(Monitor, "#STATUS#AVERIA#");
 			}
 		}catch(InterruptedException e){
 			System.out.println("Error: " + e.toString());
@@ -63,10 +64,11 @@ public class WM_WS_E {
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("ACTIVAR")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Estación desbloqueada vía Kafka. Volviendo a estado espera.");
-						escribeSocket(Monitor, "ACTIVAR");
+						escribeSocket(Monitor, "#STATUS#ESPERA#");
 						return "espera";
 					}
 				}
+				escribeSocket(Monitor, "#STATUS#BLOQUEO#");
 			}
 		}catch(InterruptedException e){
 			System.out.println("Error: " + e.toString());
@@ -106,7 +108,7 @@ public class WM_WS_E {
 		props.put(ConsumerConfig.GROUP_ID_CONFIG, "grupo-ws-" + ID);
 		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
-		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "latest");
 		
 		KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
 		consumer.subscribe(Collections.singletonList("ordenes-estacion"));
@@ -197,13 +199,13 @@ public class WM_WS_E {
 		{
 			while(true)
 			{
-				ArrayList<String> mensajes = leerKafka(kafka, "");
+				ArrayList<String> mensajes = leerKafka(kafka);
 				datosMonitor = colaMensajesMonitor.poll(1, TimeUnit.SECONDS);
 				datosPantalla = colaMensajesPantalla.poll();
 
 				// Verificaciones de pantalla y de avería en socket del monitor
 				if(datosPantalla != null && datosPantalla.equals("KO")){
-					escribeSocket(Monitor, datosPantalla);
+					escribeSocket(Monitor, "#STATUS#AVERIA#");
 					return "averia";
 				}else if(datosMonitor != null && datosMonitor.contains("\u0004")) {
 					return "error";
@@ -213,6 +215,7 @@ public class WM_WS_E {
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("BLOQUEO")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Orden de bloqueo recibida desde Kafka.");
+						escribeSocket(Monitor, "#STATUS#BLOQUEO#");
 						return "bloqueo";
 					} else if (mensaje.contains("RIEGO_REQUEST") || mensaje.contains("RIEGO_ACTIVO")) {
 						System.out.println("Orden de riego activa desde Kafka.");
@@ -221,14 +224,14 @@ public class WM_WS_E {
 						}else{
 							tiempoRiego = 0;
 						}
-						escribeSocket(Monitor, mensaje);
+						escribeSocket(Monitor, "#STATUS#RIEGO#");
 						return "riego";
 					}
 				}
 
 				// Si también se solicita iniciar desde la interfaz local (pantalla)
 				if(datosPantalla != null && datosPantalla.equals("RIEGO_ACTIVO")){
-					escribeSocket(Monitor, datosPantalla);
+					escribeSocket(Monitor, "#STATUS#RIEGO#");
 					return "riego";
 				}
 
@@ -255,7 +258,7 @@ public class WM_WS_E {
 				ArrayList<String> mensajes = leerKafka(kafka);
 
 				if(datosPantalla != null && datosPantalla.equals("KO")){
-					escribeSocket(Monitor, datosPantalla);
+					escribeSocket(Monitor, "#STATUS#AVERIA#");
 					tiempoRiego = 0;
 					return "averia";
 				}
@@ -263,12 +266,13 @@ public class WM_WS_E {
 				// CAMBIO KAFKA: Si CENTRAL manda un BLOQUEO o DETENER por Kafka durante el riego
 				for (String mensaje : mensajes) {
 					if (mensaje.contains("BLOQUEO")&&mensaje.contains(nombreCentral)) {
+						escribeSocket(Monitor, "#STATUS#BLOQUEO#");
 						System.out.println("Riego interrumpido por orden de BLOQUEO desde Kafka.");
 						tiempoRiego = 0;
 						return "bloqueo";
 					} else if (mensaje.contains("DETENER")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Riego detenido por orden de CENTRAL desde Kafka.");
-						escribeSocket(Monitor, "#RIEGO_FINALIZADO#");
+						escribeSocket(Monitor, "#STATUS#ESPERA#");
 						tiempoRiego = 0;
 						return "espera";
 					}
@@ -279,17 +283,17 @@ public class WM_WS_E {
 				}
 
 				if(datosPantalla != null && datosPantalla.equals("RIEGO_FINALIZADO")){
-					escribeSocket(Monitor, datosPantalla);
+					escribeSocket(Monitor, "#STATUS#ESPERA#");
 					tiempoRiego = 0;
 					return "espera";
 				}
 
 				if (System.currentTimeMillis() - tiempoInicio >= tiempoRiego && tiempoRiego > 0) {
-					escribeSocket(Monitor, "#RIEGO_FINALIZADO#");
+					escribeSocket(Monitor, "#STATUS#ESPERA#");
 					tiempoRiego = 0;
 					return "espera";
 				}	
-				escribeSocket(Monitor, "#STATUS#RIEGO_ACTIVO#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*(float)caudal/60000);
+				escribeSocket(Monitor, "#STATUS#RIEGO#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*(float)caudal/60000);
 			}
 		}
 		catch (Exception e)
@@ -338,7 +342,6 @@ public class WM_WS_E {
                     datos = espera(skMonitor);
                 }else if(datos.equals("averia")) {
                     datos = averia(skMonitor);
-                    colaMensajesPantalla.put("EsperaPantalla");
                 } else if(datos.equals("bloqueo")) {
                     datos = bloqueo(skMonitor);
                 } else if(datos.equals("riego")) {
@@ -348,6 +351,7 @@ public class WM_WS_E {
 					break;
                 }
             }
+			kafka.close();
 			skMonitor.close();
 			while(hiloMonitor.isAlive()) hiloMonitor.interrupt();
             while(hiloPantalla.isAlive()) hiloPantalla.interrupt();
