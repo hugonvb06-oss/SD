@@ -34,7 +34,7 @@ public class WM_WS_M {
 				escribeSocket(p_sk, "\u0015");
 				p_Datos = flujo.readUTF();
 			}
-			while(p_Datos.equals("\u0015")){
+			while(p_Datos.equals("\u0015")&&Datos!=""){
 				escribeSocket(p_sk, Datos);
 				p_Datos = flujo.readUTF();
 			}
@@ -88,15 +88,20 @@ public class WM_WS_M {
 	
 	public static boolean validaId( Socket p_sk)
     {
+        System.out.println("Emite la id a la central para ver si es correcta");
         escribeSocket(p_sk, "\u0005");
         String respuesta = "";
         leeSocket(p_sk, "\u0005");
         escribeSocket(p_sk, "#ID:"+id+"#UBICACION:"+ubicacion+"#");
         respuesta = leeSocket(p_sk, respuesta);
-        if (respuesta.equals("\u0006"))
+        if (respuesta.equals("\u0006")){
+            System.out.println("La id es correcta");
             return true;
-        else
+        }else{
+            System.out.println("La id es incorrecta");
             return false;
+        }
+            
     }
     
     public static boolean validaLrc(String p_datos)
@@ -121,12 +126,17 @@ public class WM_WS_M {
     public static boolean transmiteId(Socket p_sk)
     {
         String respuesta = "";
+        System.out.println("Transmision de los datos para la conexion con ENGINE");
         escribeSocket(p_sk, "#ID#"+id+"#UBICACION#"+ubicacion+"#CAUDAL#"+caudal);
         respuesta = leeSocket(p_sk, respuesta);
-        if (respuesta.equals("\u0006"))
+        if (respuesta.equals("\u0006")){
+            System.out.println("Datos transmitidos correctamente");
             return true;
-        else
+        }else{
+            System.out.println("Datos transmitidos incorrectamente");
             return false;
+        }
+            
     }
 	public static String lrc(String p_datos)
     {
@@ -149,26 +159,26 @@ public class WM_WS_M {
 			{
                 apagado = colaMensajesCentral.poll();
                 escribeSocket(skEngine, "#DATOS?#");
+                System.out.println("Peticion de datos a ENGINE");
                 datos = leeSocket(skEngine, "#DATOS?#");
 				Thread.sleep(1000);
-                if(datos == null || datos.contains("KO") || datos.contains("AVERIA")) {
-                    if(!averia){
-                        averia = true;
-                        escribeSocket(central, "#ID#"+id+"#STATUS#AVERIA#");
-                    }
+                if(datos == null ) {
                     
+                    escribeSocket(central, "#ID#"+id+"#STATUS#AVERIA#");
+                    System.out.println("Estado en averia por no haber respuesta de ENGINE");
                 }else if(apagado != null && apagado.equals("\u0004")){
                     escribeSocket(skEngine,"\u0004");
+                    System.out.println("Fin conexion");
                     leeSocket(skEngine, "\u0004");
                     return;
-                }else if(datos!=null){
-                    averia = false;
-                    if(datos.split("#STATUS#")[1].split("#")[0].equals("RIEGO")){
-                        escribeSocket(central, "#ID#"+id+obtenerDatos(datos));
-                    }
+                }else{
+                    System.out.println("Se han recibido correctamente los datos");
+                    escribeSocket(central, "#ID#"+id+obtenerDatos(datos));
                 }
-            
-            	System.out.println("Recibido: " + datos);
+                Thread.sleep(1000);
+            	if(colaMensajesCentral.poll()==null){
+                    System.out.println("Error: No se pudo conectar con la central");
+                }
 			}
         } catch (InterruptedException e) {
                 // Se ejecuta si otro hilo interrumpe la pausa

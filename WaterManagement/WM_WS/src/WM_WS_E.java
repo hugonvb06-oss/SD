@@ -30,6 +30,7 @@ public class WM_WS_E {
 				// Mantenemos la comprobación del socket con el monitor por si hay cierre o error crítico
 				datosMonitor = colaMensajesMonitor.poll(100, TimeUnit.MILLISECONDS);
 				if(datosMonitor != null && datosMonitor.contains("\u0004")) {
+					System.out.println("--> AVISO: Señal de apagado/desconexión recibida del Monitor (\u0004). Finalizando proceso...");
 					return "error";
 				}
 
@@ -42,7 +43,12 @@ public class WM_WS_E {
 						return "espera";
 					}
 				}
-				escribeSocket(Monitor, "#STATUS#AVERIA#");
+				if(datosMonitor!=null){
+					escribeSocket(Monitor, "#STATUS#AVERIA#");
+				}else{
+					System.out.println("Desconectado del monitor");
+					return "desconectado";
+				}
 			}
 		}catch(InterruptedException e){
 			System.out.println("Error: " + e.toString());
@@ -56,6 +62,7 @@ public class WM_WS_E {
 			while (true) {
 				datosMonitor = colaMensajesMonitor.poll(100, TimeUnit.MILLISECONDS);
 				if(datosMonitor != null && datosMonitor.contains("\u0004")) {
+					System.out.println("--> AVISO: Señal de apagado/desconexión recibida del Monitor (\u0004). Finalizando proceso...");
 					return "error";
 				}
 
@@ -68,7 +75,12 @@ public class WM_WS_E {
 						return "espera";
 					}
 				}
-				escribeSocket(Monitor, "#STATUS#BLOQUEO#");
+				if(datosMonitor!=null){
+					escribeSocket(Monitor, "#STATUS#BLOQUEO#");
+				}else{
+					System.out.println("Desconectado del monitor");
+					return "desconectado";
+				}
 			}
 		}catch(InterruptedException e){
 			System.out.println("Error: " + e.toString());
@@ -89,7 +101,7 @@ public class WM_WS_E {
 				escribeSocket(p_sk, "\u0015");
 				p_Datos = flujo.readUTF();
 			}
-			while(p_Datos.equals("\u0015")){
+			while(p_Datos.equals("\u0015")&&Datos!=""){
 				escribeSocket(p_sk, Datos);
 				p_Datos = flujo.readUTF();
 			}
@@ -150,6 +162,12 @@ public class WM_WS_E {
 		}
 		return;
 	}
+	static public String reconexion(Socket p_sk)
+	{
+		colaMensajesMonitor.take();
+		escribeSocket(p_sk, "\u0006");
+		return "espera";
+	}
 	static public void ValidarId(Socket p_sk)
 	{
 		String validar ="";
@@ -206,8 +224,10 @@ public class WM_WS_E {
 				// Verificaciones de pantalla y de avería en socket del monitor
 				if(datosPantalla != null && datosPantalla.equals("KO")){
 					escribeSocket(Monitor, "#STATUS#AVERIA#");
+					System.out.println(">>> TRANSICIÓN A AVERÍA: Falla reportada desde la Pantalla local.");
 					return "averia";
 				}else if(datosMonitor != null && datosMonitor.contains("\u0004")) {
+					System.out.println("--> AVISO: Señal de apagado/desconexión recibida del Monitor (\u0004). Finalizando proceso...");
 					return "error";
 				}
 
@@ -224,6 +244,7 @@ public class WM_WS_E {
 						}else{
 							tiempoRiego = 0;
 						}
+						System.out.println(">>> TRANSICIÓN A RIEGO: Iniciado manualmente desde la Pantalla local.");
 						escribeSocket(Monitor, "#STATUS#RIEGO#");
 						return "riego";
 					}
@@ -232,10 +253,15 @@ public class WM_WS_E {
 				// Si también se solicita iniciar desde la interfaz local (pantalla)
 				if(datosPantalla != null && datosPantalla.equals("RIEGO_ACTIVO")){
 					escribeSocket(Monitor, "#STATUS#RIEGO#");
+					System.out.println(">>> TRANSICIÓN A RIEGO: Iniciado manualmente desde la Pantalla local.");
 					return "riego";
 				}
-
-				escribeSocket(Monitor, "#STATUS#ESPERA#");
+				if(datosMonitor!=null){
+					escribeSocket(Monitor, "#STATUS#ESPERA#");
+				}else{
+					System.out.println("Desconectado del monitor");
+					return "desconectado";
+				}
 			}
 		}
 		catch (Exception e)
@@ -247,6 +273,7 @@ public class WM_WS_E {
 	static public String regando(Socket Monitor)
 	{
 		long tiempoInicio = System.currentTimeMillis();
+		long tiempoEspera = 0;
 		try
 		{
 			while(true)
@@ -259,8 +286,10 @@ public class WM_WS_E {
 
 				if(datosPantalla != null && datosPantalla.equals("KO")){
 					escribeSocket(Monitor, "#STATUS#AVERIA#");
-					tiempoRiego = 0;
-					return "averia";
+					System.out.println(">>> TRANSICIÓN A AVERÍA: Falla reportada desde la Pantalla local.");
+					tiempoEspera = System.currentTimeMillis();
+					averia(Monitor);
+					tiempoEspera = System.currentTimeMillis() - tiempoEspera;
 				}
 
 				// CAMBIO KAFKA: Si CENTRAL manda un BLOQUEO o DETENER por Kafka durante el riego
@@ -279,21 +308,31 @@ public class WM_WS_E {
 				}
 
 				if(datosMonitor != null && datosMonitor.contains("\u0004")) {
+					System.out.println("--> AVISO: Señal de apagado/desconexión recibida del Monitor (\u0004). Finalizando proceso...");
 					return "error";
 				}
 
 				if(datosPantalla != null && datosPantalla.equals("RIEGO_FINALIZADO")){
 					escribeSocket(Monitor, "#STATUS#ESPERA#");
+					System.out.println(">>> RIEGO FINALIZADO: Interrumpido desde la Pantalla local. Volviendo a ESPERA.");
 					tiempoRiego = 0;
 					return "espera";
 				}
 
-				if (System.currentTimeMillis() - tiempoInicio >= tiempoRiego && tiempoRiego > 0) {
+				if (System.currentTimeMillis() - tiempoInicio - tiempoEspera >= tiempoRiego && tiempoRiego > 0) {
 					escribeSocket(Monitor, "#STATUS#ESPERA#");
+					System.out.println(">>> RIEGO FINALIZADO: Tiempo completado con éxito. Volviendo a ESPERA."); // AÑADIR ESTO
 					tiempoRiego = 0;
 					return "espera";
 				}	
-				escribeSocket(Monitor, "#STATUS#RIEGO#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*(float)caudal/60000);
+				if(datosMonitor!=null){
+					escribeSocket(Monitor, "#STATUS#RIEGO#CAUDAL#"+caudal+"#ACUMULADO#"+(System.currentTimeMillis() - tiempoInicio)*(float)caudal/60000);
+				}else{
+					tiempoRiego = 0;
+					System.out.println("Desconectado del monitor");
+					return "desconectado";
+				}
+				
 			}
 		}
 		catch (Exception e)
@@ -346,7 +385,9 @@ public class WM_WS_E {
                     datos = bloqueo(skMonitor);
                 } else if(datos.equals("riego")) {
                     datos = regando(skMonitor);
-                }else {
+                }else if(datos.equals("desconectado")){
+					datos = reconexion(skMonitor);
+				}else{
                     System.out.println("Error en la supervisión y operación del sistema.");
 					break;
                 }
