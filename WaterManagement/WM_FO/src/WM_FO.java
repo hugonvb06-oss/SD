@@ -334,14 +334,18 @@ public final class WM_FO implements AutoCloseable {
 
         Object caudal = evento.get("flowLMin");
         Object volumen = evento.get("volumeLitres");
+        Object consumoServicio = evento.get("serviceVolumeLitres");
         Object duracion = evento.get("elapsedSeconds");
-        if (caudal != null || volumen != null || duracion != null) {
+        if (caudal != null || volumen != null || consumoServicio != null || duracion != null) {
             System.out.print("  Telemetría");
             if (caudal != null) {
                 System.out.print(" | Caudal: " + decimal(caudal) + " L/min");
             }
             if (volumen != null) {
                 System.out.print(" | Volumen acumulado: " + decimal(volumen) + " L");
+            }
+            if (consumoServicio != null) {
+                System.out.print(" | Consumo del servicio: " + decimal(consumoServicio) + " L");
             }
             if (duracion != null) {
                 System.out.print(" | Tiempo: " + texto(duracion) + " s");

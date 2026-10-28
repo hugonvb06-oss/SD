@@ -107,7 +107,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
             return;
         }
 
-        ensureTopicsExist();
+        if (topicManagementEnabled()) ensureTopicsExist();
         running.set(true);
         consumerThread = new Thread(this::consumeLoop, "wm-fo-kafka-consumer-" + operatorId);
         consumerThread.setDaemon(true);
@@ -134,7 +134,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
         if (wsId <= 0) {
             throw new IllegalArgumentException("El ID de la WS debe ser positivo.");
         }
-        if (durationSeconds < 0 || durationSeconds > 86400) {
+        if (durationSeconds <= 0 || durationSeconds > 86400) {
             throw new IllegalArgumentException("La duración debe estar entre 1 y 86400 segundos.");
         }
 
@@ -309,6 +309,11 @@ public final class KafkaOperatorClient implements AutoCloseable {
         } catch (Exception e) {
             System.err.println("Se ha ignorado un mensaje de respuesta Kafka mal formado: " + e.getMessage());
         }
+    }
+
+    private boolean topicManagementEnabled() {
+        String configured = System.getenv("WM_FO_MANAGE_TOPICS");
+        return configured == null || Boolean.parseBoolean(configured.trim());
     }
 
     private void ensureTopicsExist() throws Exception {
