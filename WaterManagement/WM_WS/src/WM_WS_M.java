@@ -291,11 +291,8 @@ public class WM_WS_M {
                     datos = espera(skEngine, central);
                 }else if(datos.equals("averia")) {
                     datos = averia(central, skEngine);
-                    colaMensajesEngine.put("Monitorea");
                 } else if(datos.equals("bloqueo")) {
-                    hiloEngine.interrupt(); // Interrumpe el hilo de monitorización del Engine
                     datos = bloqueo(skEngine, central);
-                    colaMensajesEngine.put("Monitorea");
                 } else if(datos.equals("riego")) {
                     datos = regando(skEngine, central);
                 }else {
@@ -304,6 +301,8 @@ public class WM_WS_M {
                     break;
                 }
             }
+            central.close();
+            skEngine.close();
             while(hiloEngine.isAlive()) hiloEngine.interrupt();
             while(hiloCentral.isAlive()) hiloCentral.interrupt();
         }catch (Exception e) {

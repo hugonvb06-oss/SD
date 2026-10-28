@@ -34,9 +34,9 @@ public class WM_WS_E {
 				}
 
 				// CAMBIO KAFKA: Consultamos Kafka a la espera del comando ACTIVAR enviado por CENTRAL
-				ArrayList<String> mensajes = leerKafka(kafka, nombreCentral);
+				ArrayList<String> mensajes = leerKafka(kafka);
 				for (String mensaje : mensajes) {
-					if (mensaje.contains("ACTIVAR")) {
+					if (mensaje.contains("ACTIVAR")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Avería resuelta vía Kafka. Volviendo a estado espera.");
 						escribeSocket(Monitor, "ACTIVAR");
 						return "espera";
@@ -59,9 +59,9 @@ public class WM_WS_E {
 				}
 
 				// CAMBIO KAFKA: Leer mensajes de Kafka esperando la orden ACTIVAR
-				ArrayList<String> mensajes = leerKafka(kafka, nombreCentral);
+				ArrayList<String> mensajes = leerKafka(kafka);
 				for (String mensaje : mensajes) {
-					if (mensaje.contains("ACTIVAR")) {
+					if (mensaje.contains("ACTIVAR")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Estación desbloqueada vía Kafka. Volviendo a estado espera.");
 						escribeSocket(Monitor, "ACTIVAR");
 						return "espera";
@@ -103,22 +103,22 @@ public class WM_WS_E {
 	public static KafkaConsumer<String, String> crearKafka(String ip, int puerto) {
 		Properties props = new Properties();
 		props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, ip + ":" + puerto);
-		props.put(ConsumerConfig.GROUP_ID_CONFIG, "grupo-java-" + ID);
+		props.put(ConsumerConfig.GROUP_ID_CONFIG, "grupo-ws-" + ID);
 		props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 		props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
 		props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
 		
 		KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props);
-		consumer.subscribe(Collections.singletonList("mi-topico"));
+		consumer.subscribe(Collections.singletonList("ordenes-estacion"));
 		return consumer;
 	}
 
-	public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer, String origen) {
+	public static ArrayList<String> leerKafka(KafkaConsumer<String, String> consumer) {
 		ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(100));
 
 		ArrayList<String> mensajes = new ArrayList<>();
 		for (ConsumerRecord<String, String> record : records) {
-			if (record.value() != null && record.value().contains("\"wsId\":" + ID)&&(origen.equals("")||record.value().contains(origen))) {
+			if (record.value() != null && record.value().contains("\"wsId\":" + ID)) {
 				// Procesar el mensaje correctamente
 				mensajes.add(record.value());
 
@@ -211,13 +211,15 @@ public class WM_WS_E {
 
 				// CAMBIO KAFKA: Procesar los cambios de estado (BLOQUEO o RIEGO) provenientes de la cola de KAFKA
 				for (String mensaje : mensajes) {
-					if (mensaje.contains("BLOQUEO")) {
+					if (mensaje.contains("BLOQUEO")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Orden de bloqueo recibida desde Kafka.");
 						return "bloqueo";
 					} else if (mensaje.contains("RIEGO_REQUEST") || mensaje.contains("RIEGO_ACTIVO")) {
 						System.out.println("Orden de riego activa desde Kafka.");
 						if(mensaje.contains("#TIEMPO#")){
 							tiempoRiego = Long.parseLong(mensaje.split("#TIEMPO#")[1].split("#")[0]);
+						}else{
+							tiempoRiego = 0;
 						}
 						escribeSocket(Monitor, mensaje);
 						return "riego";
@@ -250,7 +252,7 @@ public class WM_WS_E {
 				String datosMonitor = colaMensajesMonitor.poll(1, TimeUnit.SECONDS);
 
 				// CAMBIO KAFKA: Consultar los mensajes recibidos por Kafka durante el riego
-				ArrayList<String> mensajes = leerKafka(kafka, nombreCentral);
+				ArrayList<String> mensajes = leerKafka(kafka);
 
 				if(datosPantalla != null && datosPantalla.equals("KO")){
 					escribeSocket(Monitor, datosPantalla);
@@ -260,11 +262,11 @@ public class WM_WS_E {
 
 				// CAMBIO KAFKA: Si CENTRAL manda un BLOQUEO o DETENER por Kafka durante el riego
 				for (String mensaje : mensajes) {
-					if (mensaje.contains("BLOQUEO")) {
+					if (mensaje.contains("BLOQUEO")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Riego interrumpido por orden de BLOQUEO desde Kafka.");
 						tiempoRiego = 0;
 						return "bloqueo";
-					} else if (mensaje.contains("DETENER")) {
+					} else if (mensaje.contains("DETENER")&&mensaje.contains(nombreCentral)) {
 						System.out.println("Riego detenido por orden de CENTRAL desde Kafka.");
 						escribeSocket(Monitor, "#RIEGO_FINALIZADO#");
 						tiempoRiego = 0;
@@ -346,6 +348,7 @@ public class WM_WS_E {
 					break;
                 }
             }
+			skMonitor.close();
 			while(hiloMonitor.isAlive()) hiloMonitor.interrupt();
             while(hiloPantalla.isAlive()) hiloPantalla.interrupt();
 			/*
