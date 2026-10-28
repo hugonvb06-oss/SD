@@ -51,7 +51,7 @@ public class WM_WS_M {
 	* Escribe dato en el socket cliente. Devuelve numero de bytes escritos,
 	* o -1 si hay error.
 	*/
-	static public void escribeSocket (Socket p_sk, String p_Datos)
+	static public boolean escribeSocket (Socket p_sk, String p_Datos)
 	{
         String mensajeFinal = "";
 		try
@@ -66,8 +66,9 @@ public class WM_WS_M {
 		catch (Exception e)
 		{
 			System.out.println("Error: " + e.toString());
+            return false;
 		}
-		return;
+		return true;
 	}
 	
 	
@@ -150,28 +151,30 @@ public class WM_WS_M {
     public static String obtenerDatos(String datos){
         return datos.substring(2, datos.length());
     }
-    public static void monitoreo(Socket skEngine, Socket central){
+    public static boolean monitoreo(Socket skEngine, Socket central){
         String datos = "";
         String apagado = "";
-        boolean averia = false;
 		try {
 			while(true)
 			{
                 apagado = colaMensajesCentral.poll();
-                escribeSocket(skEngine, "#DATOS?#");
+                if(!escribeSocket(skEngine, "#DATOS?#")){
+                    
+                    return false;
+                }
                 System.out.println("Peticion de datos a ENGINE");
                 datos = leeSocket(skEngine, "#DATOS?#");
 				Thread.sleep(1000);
                 if(datos == null ) {
-                    
                     escribeSocket(central, "#ID#"+id+"#STATUS#AVERIA#");
                     System.out.println("Estado en averia por no haber respuesta de ENGINE");
                 }else if(apagado != null && apagado.equals("\u0004")){
                     escribeSocket(skEngine,"\u0004");
                     System.out.println("Fin conexion");
                     leeSocket(skEngine, "\u0004");
-                    return;
+                    return true;
                 }else{
+                    
                     System.out.println("Se han recibido correctamente los datos");
                     escribeSocket(central, "#ID#"+id+obtenerDatos(datos));
                 }
@@ -185,6 +188,7 @@ public class WM_WS_M {
                 Thread.currentThread().interrupt();
                 System.err.println("El hilo fue interrumpido");
         }
+        return true;
     }
 
 	/**
@@ -213,13 +217,17 @@ public class WM_WS_M {
             skEngine.setSoTimeout(1000); // Establece un tiempo de espera de 1 segundo para las operaciones de lectura
             String datos = "";
             
-            while(!transmiteId(skEngine));
+            
             colaMensajesCentral = new ArrayBlockingQueue<>(100);
             HiloWS hiloCentral = new HiloWS(central, colaMensajesCentral);
             hiloCentral.start();
             colaMensajesCentral.put("EsperaContinua");
-            datos = "espera";
-            monitoreo(skEngine, central);
+    
+            while(!monitoreo(skEngine, central)){
+                skEngine = skServidor.accept();
+                while(!transmiteId(skEngine));
+                
+            }
             
             central.close();
             skEngine.close();

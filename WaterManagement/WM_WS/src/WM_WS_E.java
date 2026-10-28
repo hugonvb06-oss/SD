@@ -164,22 +164,30 @@ public class WM_WS_E {
 	}
 	static public String reconexion(Socket p_sk)
 	{
-		colaMensajesMonitor.take();
-		escribeSocket(p_sk, "\u0006");
+		try{
+			colaMensajesMonitor.take();
+			escribeSocket(p_sk, "\u0006");
+		}catch(Exception e){
+			System.out.println("Error: " + e.toString());
+			return "error";
+		}
+		
 		return "espera";
 	}
-	static public void ValidarId(Socket p_sk)
+	static public String ValidarId(Socket p_sk)
 	{
 		String validar ="";
 		while (validar==null||!validar.contains("ID")) {
 			validar =leeSocket(p_sk, validar);
 		}
+		String riego = "";
 		
 		
 		ID = validar.split("#ID#")[1].split("#")[0];
 		ubicacion = validar.split("#UBICACION#")[1].split("#")[0];
 		caudal = Integer.parseInt(validar.split("#CAUDAL#")[1].split("#")[0]);
 		escribeSocket(p_sk, "\u0006");
+		return null;
 	}
 	public static String lrc(String p_datos)
 	{

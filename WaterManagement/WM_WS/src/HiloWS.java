@@ -122,13 +122,13 @@ public class HiloWS extends Thread {
 				escribeSocket(p_sk, Datos);
 				p_Datos = flujo.readUTF();
 			}
-			
+			 return p_Datos;
 		}
 		catch (Exception e)
 		{
 			System.out.println("Error: " + e.toString());
 		}
-      return Datos;
+		return null;
 	}
     public String esperaCola(){
         String mensaje = "";
