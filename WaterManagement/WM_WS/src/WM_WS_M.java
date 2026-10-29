@@ -1,6 +1,7 @@
 import java.net.ServerSocket;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 import java.io.BufferedReader;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
@@ -149,7 +150,10 @@ public class WM_WS_M {
         return p_datos+Integer.toHexString(lrc);
     }
     public static String obtenerDatos(String datos){
-        return datos.substring(2, datos.length());
+        if (datos != null && datos.length() >= 2) {
+        return datos.substring(2);
+        }
+        return datos != null ? datos : "";
     }
     public static boolean monitoreo(Socket skEngine, Socket central){
         String datos = "";
@@ -157,7 +161,7 @@ public class WM_WS_M {
 		try {
 			while(true)
 			{
-                apagado = colaMensajesCentral.poll();
+                
                 if(!escribeSocket(skEngine, "#DATOS?#")){
                     
                     return false;
@@ -168,19 +172,19 @@ public class WM_WS_M {
                 if(datos == null ) {
                     escribeSocket(central, "#ID#"+id+"#STATUS#AVERIA#");
                     System.out.println("Estado en averia por no haber respuesta de ENGINE");
-                }else if(apagado != null && apagado.equals("\u0004")){
-                    escribeSocket(skEngine,"\u0004");
-                    System.out.println("Fin conexion");
-                    leeSocket(skEngine, "\u0004");
-                    return true;
                 }else{
                     
                     System.out.println("Se han recibido correctamente los datos");
                     escribeSocket(central, "#ID#"+id+obtenerDatos(datos));
                 }
-                Thread.sleep(1000);
-            	if(colaMensajesCentral.poll()==null){
+                apagado = colaMensajesCentral.poll(1, TimeUnit.SECONDS);
+            	if(apagado==null){
                     System.out.println("Error: No se pudo conectar con la central");
+                }else if(apagado.equals("\u0004")){
+                    escribeSocket(skEngine,"\u0004");
+                    System.out.println("Fin conexion");
+                    leeSocket(skEngine, "\u0004");
+                    return true;
                 }
 			}
         } catch (InterruptedException e) {
@@ -217,7 +221,7 @@ public class WM_WS_M {
             skEngine.setSoTimeout(1000); // Establece un tiempo de espera de 1 segundo para las operaciones de lectura
             String datos = "";
             
-            
+            while(!transmiteId(skEngine));
             colaMensajesCentral = new ArrayBlockingQueue<>(100);
             HiloWS hiloCentral = new HiloWS(central, colaMensajesCentral);
             hiloCentral.start();
@@ -225,6 +229,7 @@ public class WM_WS_M {
     
             while(!monitoreo(skEngine, central)){
                 skEngine = skServidor.accept();
+                skEngine.setSoTimeout(1000);
                 while(!transmiteId(skEngine));
                 
             }
