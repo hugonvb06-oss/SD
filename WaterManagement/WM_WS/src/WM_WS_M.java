@@ -94,10 +94,11 @@ public class WM_WS_M {
         escribeSocket(p_sk, "\u0005");
         String respuesta = "";
         leeSocket(p_sk, "\u0005");
-        escribeSocket(p_sk, "#ID:"+id+"#UBICACION:"+ubicacion+"#");
+        escribeSocket(p_sk, "HELLO#"+id+"#"+ubicacion+"#"+caudal);
         respuesta = leeSocket(p_sk, respuesta);
-        if (respuesta.equals("\u0006")){
+        if (respuesta.contains("HELLO_OK#OK#WS_"+id+"_REGISTRADA")){
             System.out.println("La id es correcta");
+            escribeSocket(p_sk, "\u0006");
             return true;
         }else{
             System.out.println("La id es incorrecta");
@@ -185,6 +186,10 @@ public class WM_WS_M {
                     System.out.println("Fin conexion");
                     leeSocket(skEngine, "\u0004");
                     return true;
+                }else if(apagado.contains("ACK#STATUS#OK")){
+                    escribeSocket(central, "\u0006");
+                }else{
+                    escribeSocket(central, "\u0015");
                 }
 			}
         } catch (InterruptedException e) {
