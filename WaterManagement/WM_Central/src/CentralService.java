@@ -30,6 +30,7 @@ import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ExecutorService;
@@ -45,7 +46,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class CentralService implements AutoCloseable {
     public static final String TOPIC_SOLICITUDES = "wm.riego.solicitudes";
     public static final String TOPIC_RESPUESTAS = "wm.riego.respuestas";
-    public static final String TOPIC_ORDENES_WS = "wm.ws.ordenes";
+    public static final String TOPIC_LATIDO = "wm.central.latido";
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<Map<String, Object>>() { };
@@ -59,10 +60,14 @@ public final class CentralService implements AutoCloseable {
     private final AtomicBoolean running = new AtomicBoolean(true);
     private final ConcurrentMap<Integer, HiloCentral> sessions = new ConcurrentHashMap<>();
     private final ConcurrentMap<Integer, StationSnapshot> latestStates = new ConcurrentHashMap<>();
+    private volatile String firmaPanel = "";
     private final ConcurrentMap<Integer, ActiveRiego> activeByWs = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, ActiveRiego> activeByRequest = new ConcurrentHashMap<>();
     // Bloquea nuevos riegos mientras una orden administrativa espera confirmación de la WS.
     private final ConcurrentMap<Integer, PendingControl> pendingControls = new ConcurrentHashMap<>();
+    // Órdenes pendientes de entregar a cada WS. Viajan dentro de la respuesta al STATUS
+    // del monitor, de modo que no depende de Kafka y no se pierde ninguna transacción.
+    private final ConcurrentMap<Integer, ConcurrentLinkedQueue<String>> pendingCommands = new ConcurrentHashMap<>();
     private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, r -> {
         Thread t = new Thread(r, "wm-central-supervision"); t.setDaemon(true); return t;
     });
@@ -105,11 +110,59 @@ public final class CentralService implements AutoCloseable {
         scheduler.scheduleAtFixedRate(this::checkTimeoutsSafely, 1, 1, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::retryTerminalEventsSafely, 5, 5, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::reconcileOrphanedRequestsSafely, 20, 5, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::publishHeartbeatSafely, 0, 2, TimeUnit.SECONDS);
+    }
+
+    /**
+     * Permite o deniega el registro de una WS. Por defecto se acepta cualquier WS con
+     * datos válidos; si se define WM_WS_ALLOWED_IDS (p. ej. "1,2,3") o
+     * WM_WS_REQUIRE_KNOWN=true solo se admiten las autorizadas.
+     */
+    public boolean puedeRegistrar(int id) {
+        String require = System.getenv("WM_WS_REQUIRE_KNOWN");
+        if (require != null && Boolean.parseBoolean(require.trim()) && !db.existeWS(id)) return false;
+        String allowed = System.getenv("WM_WS_ALLOWED_IDS");
+        if (allowed == null || allowed.trim().isEmpty()) return true;
+        for (String token : allowed.split("[,;\\s]+")) {
+            try {
+                if (Integer.parseInt(token.trim()) == id) return true;
+            } catch (NumberFormatException ignored) { }
+        }
+        return false;
+    }
+
+    /** Extrae las órdenes pendientes de una WS para adjuntarlas a su próxima respuesta. */
+    public List<String> takeCommands(int wsId) {
+        ConcurrentLinkedQueue<String> queue = pendingCommands.get(wsId);
+        List<String> result = new ArrayList<>();
+        if (queue == null) return result;
+        String command;
+        while ((command = queue.poll()) != null) result.add(command);
+        return result;
+    }
+
+    /** Devuelve a la cola las órdenes que no se pudieron entregar (fallo del socket). */
+    public void requeueCommands(int wsId, List<String> commands) {
+        if (commands == null || commands.isEmpty()) return;
+        ConcurrentLinkedQueue<String> queue = pendingCommands.computeIfAbsent(wsId, k -> new ConcurrentLinkedQueue<>());
+        for (String command : commands) queue.offer(command);
+    }
+
+    /** Descarta órdenes obsoletas al conectar/desconectar una WS. */
+    public void clearCommands(int wsId) {
+        ConcurrentLinkedQueue<String> queue = pendingCommands.get(wsId);
+        if (queue != null) queue.clear();
+    }
+
+    private void queueCommand(int wsId, String type, String requestId, int operatorId, int durationSeconds) {
+        String command = type + "|" + (requestId == null ? "" : requestId) + "|" + operatorId + "|" + durationSeconds;
+        pendingCommands.computeIfAbsent(wsId, k -> new ConcurrentLinkedQueue<>()).offer(command);
     }
 
     public boolean registerStation(int id, String location, double flowLMin, HiloCentral session) {
         if (id <= 0 || !Double.isFinite(flowLMin) || flowLMin < 0 || location == null || location.trim().isEmpty()) return false;
         if (!db.registrarOActualizarWS(id, location)) return false;
+        clearCommands(id);
         HiloCentral previous = sessions.put(id, session);
         if (previous != null && previous != session) {
             ActiveRiego interrupted = activeByWs.get(id);
@@ -130,6 +183,7 @@ public final class CentralService implements AutoCloseable {
     public void unregisterStation(int id, HiloCentral session) {
         boolean removed = sessions.remove(id, session);
         if (!removed) return; // una conexión más nueva ya sustituyó esta sesión
+        clearCommands(id);
         db.actualizarEstadoWS(id, "DESCONECTADA");
         StationSnapshot old = latestStates.get(id);
         if (old != null) latestStates.put(id, old.withState("DESCONECTADA"));
@@ -154,11 +208,17 @@ public final class CentralService implements AutoCloseable {
             System.err.println("Estado/telemetría inválidos recibidos de WS " + wsId + "; se ignoran.");
             return false;
         }
-        StationSnapshot snapshot = new StationSnapshot(wsId, state, flowLMin, volumeLitres,
+        StationSnapshot anterior = latestStates.get(wsId);
+        // El agua suministrada es acumulativa y nunca puede disminuir. Un monitor
+        // recién reiniciado aún no conoce el volumen del motor y reporta 0: se conserva
+        // el último valor válido hasta que el motor vuelva a informar.
+        double volumen = Math.max(0, volumeLitres);
+        if (anterior != null && anterior.volumeLitres > volumen) volumen = anterior.volumeLitres;
+        StationSnapshot snapshot = new StationSnapshot(wsId, state, flowLMin, volumen,
                 elapsedSeconds, emptyToNull(requestId), operatorId, System.currentTimeMillis());
         latestStates.put(wsId, snapshot);
         db.actualizarEstadoWS(wsId, state);
-        db.actualizarAguaWS(wsId, volumeLitres);
+        db.actualizarAguaWS(wsId, volumen);
         PendingControl pending = pendingControls.get(wsId);
         if (pending != null && pending.expectedState.equals(state)) {
             pendingControls.remove(wsId, pending);
@@ -166,7 +226,7 @@ public final class CentralService implements AutoCloseable {
         }
         System.out.printf(Locale.ROOT,
                 "[WS %d] Estado=%s | Caudal=%.2f L/min | Volumen=%.2f L | Tiempo=%d s%n",
-                wsId, state, flowLMin, volumeLitres, elapsedSeconds);
+                wsId, state, flowLMin, volumen, elapsedSeconds);
 
         ActiveRiego active = activeByWs.get(wsId);
         // Recuperación tras reiniciar CENTRAL: si la estación informa el requestId persistido,
@@ -174,38 +234,49 @@ public final class CentralService implements AutoCloseable {
         if (active == null && snapshot.requestId != null) {
             active = recoverActive(snapshot);
         }
-        if (active == null) return true;
-
-        synchronized (active) {
-            if (!active.terminal.get() && snapshot.requestId != null && active.requestId.equals(snapshot.requestId)
-                    && active.operatorId == operatorId) {
-                active.lastFlow = flowLMin;
-                active.lastVolume = volumeLitres;
-                active.lastElapsed = elapsedSeconds;
-                if ("REGANDO".equals(state)) {
-                    if (!active.started) {
-                        active.started = true;
-                        active.startedAtMillis = System.currentTimeMillis() - elapsedSeconds * 1000L;
-                        db.actualizarEstadoSolicitud(active.requestId, "STARTED", null);
-                        publishEvent(active, "STARTED", "La WS ha confirmado que el riego está en curso.", false);
+        if (active != null) {
+            synchronized (active) {
+                boolean mismoRequest = snapshot.requestId != null
+                        && active.requestId.equals(snapshot.requestId) && active.operatorId == operatorId;
+                // Red de seguridad: si el motor ya no informa del requestId (porque lo
+                // confirmó antes de que CENTRAL lo viera) pero el servicio había
+                // comenzado y la estación vuelve a estar disponible, ha terminado.
+                boolean finSinRequest = snapshot.requestId == null && active.started;
+                if (!active.terminal.get() && (mismoRequest || finSinRequest)) {
+                    // La telemetría se actualiza siempre, también cuando se informa de una
+                    // fuga, para no perder el agua que ya se ha suministrado.
+                    active.lastFlow = flowLMin;
+                    active.lastVolume = volumen;
+                    active.lastElapsed = elapsedSeconds;
+                    if ("REGANDO".equals(state)) {
+                        if (!active.started) {
+                            active.started = true;
+                            active.startedAtMillis = System.currentTimeMillis() - elapsedSeconds * 1000L;
+                            db.actualizarEstadoSolicitud(active.requestId, "STARTED", null);
+                            publishEvent(active, "STARTED", "La WS ha confirmado que el riego está en curso.", false);
+                        }
+                        publishEvent(active, "PROGRESS", "Riego en curso.", false);
+                    } else if (active.started && "ACTIVADA".equals(state)) {
+                        finish(active, "COMPLETED", "Riego finalizado.");
+                    } else if (!active.started && "ACTIVADA".equals(state) && elapsedSeconds > 0) {
+                        // La estación puede completar un riego corto entre dos informes y no llegar
+                        // a publicar un estado REGANDO. Exigimos duración observada > 0 para no
+                        // confundir un ACK de inicio sin ejecutar con una finalización correcta.
+                        finish(active, "COMPLETED", "Riego finalizado; la transición intermedia no se observó.");
                     }
-                    publishEvent(active, "PROGRESS", "Riego en curso.", false);
-                } else if (active.started && "ACTIVADA".equals(state)) {
-                    finish(active, "COMPLETED", "Riego finalizado.");
-                } else if (!active.started && "ACTIVADA".equals(state) && elapsedSeconds > 0) {
-                    // La estación puede completar un riego corto entre dos informes y no llegar
-                    // a publicar un estado REGANDO. Exigimos duración observada > 0 para no
-                    // confundir un ACK de inicio sin ejecutar con una finalización correcta.
-                    finish(active, "COMPLETED", "Riego finalizado; la transición intermedia no se observó.");
                 }
             }
         }
 
-        if ("FUGA".equals(state) || "DESCONECTADA".equals(state)) {
+        if ("FUGA".equals(state)) {
             ActiveRiego running = activeByWs.get(wsId);
             if (running != null) {
-                finish(running, "FAILED", "La estación notificó avería o desconexión.");
-                publishWsSafetyStop(wsId, "STOP_IRRIGATION");
+                finish(running, "FAILED", "La estación ha notificado una avería/fuga; el riego finaliza de inmediato.");
+            }
+        } else if ("DESCONECTADA".equals(state)) {
+            ActiveRiego running = activeByWs.get(wsId);
+            if (running != null) {
+                finish(running, "FAILED", "La estación se ha desconectado durante el servicio.");
             }
         } else if ("FUERA_SERVICIO".equals(state)) {
             ActiveRiego running = activeByWs.get(wsId);
@@ -227,6 +298,9 @@ public final class CentralService implements AutoCloseable {
         recovered.lastFlow = snapshot.flowLMin;
         recovered.lastVolume = snapshot.volumeLitres;
         recovered.lastElapsed = snapshot.elapsedSeconds;
+        // Tras una recuperación no se conoce el volumen previo al servicio; se informa
+        // del acumulado disponible en lugar de inventar una cifra.
+        recovered.baseVolume = 0;
         ActiveRiego winner = activeByWs.putIfAbsent(wsId, recovered);
         if (winner != null) return winner;
         activeByRequest.put(snapshot.requestId, recovered);
@@ -312,7 +386,7 @@ public final class CentralService implements AutoCloseable {
         try (AdminClient admin = AdminClient.create(p)) {
             Set<String> existing = admin.listTopics().names().get(10, TimeUnit.SECONDS);
             List<NewTopic> missing = new ArrayList<>();
-            for (String topic : Arrays.asList(TOPIC_SOLICITUDES, TOPIC_RESPUESTAS, TOPIC_ORDENES_WS)) {
+            for (String topic : Arrays.asList(TOPIC_SOLICITUDES, TOPIC_RESPUESTAS, TOPIC_LATIDO)) {
                 if (!existing.contains(topic)) missing.add(new NewTopic(topic, 3, (short) 1));
             }
             if (!missing.isEmpty()) {
@@ -468,6 +542,7 @@ public final class CentralService implements AutoCloseable {
         }
 
         ActiveRiego active = new ActiveRiego(requestId, operatorId, wsId, duration);
+        active.baseVolume = currentStatus.volumeLitres;
         ActiveRiego previous = activeByWs.putIfAbsent(wsId, active);
         if (previous != null) {
             finish(active, "REJECTED", "La WS ya tiene un servicio en curso.");
@@ -477,23 +552,10 @@ public final class CentralService implements AutoCloseable {
         db.actualizarEstadoSolicitud(requestId, "AUTHORIZED", null);
         publishEvent(active, "AUTHORIZED", "La WS está disponible; se solicita el inicio del riego.", false);
 
-        Map<String, Object> order = new LinkedHashMap<>();
-        order.put("type", "START_IRRIGATION");
-        order.put("requestId", requestId);
-        order.put("operatorId", operatorId);
-        order.put("wsId", wsId);
-        order.put("durationSeconds", duration);
-        order.put("createdAt", Instant.now().toString());
-        if (!publish(TOPIC_ORDENES_WS, Integer.toString(wsId), order)) {
-            finish(active, "FAILED", "No se pudo confirmar el envío de la orden a la WS por Kafka.");
-            // Si el resultado del envío fue ambiguo, la parada es idempotente y evita
-            // mantener un riego activo sin supervisión, siempre que la WS esté conectada.
-            publishWsSafetyStop(wsId, "STOP_IRRIGATION");
-        } else {
-            active.commandSent = true;
-            active.commandSentAtMillis = System.currentTimeMillis();
-            System.out.println("Orden de riego enviada: WS=" + wsId + ", requestId=" + requestId);
-        }
+        queueCommand(wsId, "START_IRRIGATION", requestId, operatorId, duration);
+        active.commandSent = true;
+        active.commandSentAtMillis = System.currentTimeMillis();
+        System.out.println("Orden de riego encolada para la WS " + wsId + ": requestId=" + requestId);
     }
 
     private void finishRejected(String requestId, int operatorId, int wsId, String message) {
@@ -515,7 +577,7 @@ public final class CentralService implements AutoCloseable {
             Map<String,Object> event = makeEvent(active.requestId, active.operatorId, active.wsId,
                     status, message, active.lastFlow, active.lastVolume, active.lastElapsed);
             // La telemetría acumula litros desde el inicio de ESTE riego, no desde el arranque de la WS.
-            event.put("serviceVolumeLitres", Math.max(0.0, active.lastVolume));
+            event.put("serviceVolumeLitres", Math.max(0.0, active.lastVolume - active.baseVolume));
             if (terminal) sendTerminal(event);
             else {
                 db.actualizarEstadoSolicitud(active.requestId, status, null);
@@ -601,6 +663,15 @@ public final class CentralService implements AutoCloseable {
     private void checkTimeoutsSafely() {
         try {
             long now = System.currentTimeMillis();
+            for (Map.Entry<Integer, PendingControl> entry : pendingControls.entrySet()) {
+                PendingControl pending = entry.getValue();
+                if (pending != null && now - pending.createdAtMillis > 15_000L) {
+                    if (pendingControls.remove(entry.getKey(), pending)) {
+                        System.out.println("WS " + entry.getKey() + ": la orden " + pending.commandType
+                                + " no se confirmó en 15 s; se libera el bloqueo de nuevas solicitudes.");
+                    }
+                }
+            }
             for (ActiveRiego active : activeByRequest.values()) {
                 if (active.commandSent && !active.started && now - active.commandSentAtMillis > START_ACK_TIMEOUT_MS) {
                     finish(active, "FAILED", "La WS no confirmó el inicio dentro del tiempo esperado.");
@@ -635,10 +706,15 @@ public final class CentralService implements AutoCloseable {
                     recoverActive(snapshot);
                     if (activeByRequest.containsKey(requestId)) continue;
                 }
-                long createdAt = 0;
-                try { createdAt = Instant.parse(string(row.get("createdAt"))).toEpochMilli(); }
-                catch (Exception ignored) { }
-                if (createdAt > 0 && now - createdAt < 30_000) continue;
+                long updatedAt = 0;
+                try {
+                    String stamp = string(row.get("updatedAt"));
+                    if (stamp == null || stamp.isEmpty()) stamp = string(row.get("createdAt"));
+                    updatedAt = Instant.parse(stamp).toEpochMilli();
+                } catch (Exception ignored) { }
+                // Margen amplio para que una WS que sigue regando tras reiniciar CENTRAL
+                // pueda reconectarse y recuperar el seguimiento sin marcarse como fallida.
+                if (updatedAt > 0 && now - updatedAt < 60_000) continue;
                 int operatorId = number(row.get("operatorId"), -1);
                 Map<String,Object> event = makeEvent(requestId, operatorId, wsId, "FAILED",
                         "CENTRAL no pudo recuperar el estado de la solicitud después de una interrupción. No se repetirá automáticamente.", 0, 0, 0);
@@ -650,9 +726,9 @@ public final class CentralService implements AutoCloseable {
     }
 
     private void publishWsSafetyStop(int wsId, String type) {
-        Map<String,Object> cmd = new LinkedHashMap<>(); cmd.put("type", type); cmd.put("wsId", wsId);
-        cmd.put("requestId", "safety-" + UUID.randomUUID()); cmd.put("createdAt", Instant.now().toString());
-        publishAsync(TOPIC_ORDENES_WS, Integer.toString(wsId), cmd);
+        HiloCentral session = sessions.get(wsId);
+        if (session == null || !session.isSessionOpen()) return;
+        queueCommand(wsId, type, "safety-" + UUID.randomUUID(), 0, 0);
     }
 
     /** Inicia un riego administrativo en una WS concreta o en todas las WS conectadas (wsId=0). */
@@ -695,6 +771,7 @@ public final class CentralService implements AutoCloseable {
         }
 
         ActiveRiego active = new ActiveRiego("CENTRAL-" + UUID.randomUUID(), 0, wsId, durationSeconds);
+        active.baseVolume = snapshot.volumeLitres;
         if (!db.guardarSolicitudSiNueva(active.requestId, 0, wsId, durationSeconds)) {
             System.out.println("WS " + wsId + ": no se pudo guardar la solicitud administrativa; no se iniciará.");
             return;
@@ -708,21 +785,10 @@ public final class CentralService implements AutoCloseable {
         db.actualizarEstadoSolicitud(active.requestId, "AUTHORIZED", null);
         publishEvent(active, "AUTHORIZED", "Riego iniciado desde el menú administrativo de CENTRAL.", false);
 
-        Map<String, Object> cmd = new LinkedHashMap<>();
-        cmd.put("type", "START_IRRIGATION");
-        cmd.put("requestId", active.requestId);
-        cmd.put("operatorId", 0);
-        cmd.put("wsId", wsId);
-        cmd.put("durationSeconds", durationSeconds);
-        cmd.put("createdAt", Instant.now().toString());
-        if (!publish(TOPIC_ORDENES_WS, Integer.toString(wsId), cmd)) {
-            finish(active, "FAILED", "No se pudo confirmar el envío de la orden desde CENTRAL.");
-            publishWsSafetyStop(wsId, "STOP_IRRIGATION");
-        } else {
-            active.commandSent = true;
-            active.commandSentAtMillis = System.currentTimeMillis();
-            System.out.println("Riego administrativo enviado a WS " + wsId + ".");
-        }
+        queueCommand(wsId, "START_IRRIGATION", active.requestId, 0, durationSeconds);
+        active.commandSent = true;
+        active.commandSentAtMillis = System.currentTimeMillis();
+        System.out.println("Riego administrativo encolado para WS " + wsId + ".");
     }
 
     /** Envía una orden a una WS concreta o a todas las WS conectadas (wsId=0). */
@@ -752,31 +818,124 @@ public final class CentralService implements AutoCloseable {
         }
 
         for (Integer id : ids) {
-            StationSnapshot snapshot = latestStates.get(id);
-            if ("ACTIVATE_WS".equals(type) && snapshot != null && "FUGA".equals(snapshot.state)) {
-                System.out.println("WS " + id + ": no se activa porque sigue reportando FUGA; primero debe repararse.");
-                continue;
-            }
-            if ("BLOCK_WS".equals(type) && snapshot != null && "FUGA".equals(snapshot.state)) {
-                System.out.println("WS " + id + ": sigue en FUGA; se conserva el estado de avería y no se enmascara como bloqueada.");
-                continue;
-            }
-            Map<String, Object> cmd = new LinkedHashMap<>();
-            cmd.put("type", type);
-            cmd.put("wsId", id);
-            cmd.put("requestId", "CENTRAL-" + UUID.randomUUID());
-            cmd.put("createdAt", Instant.now().toString());
             PendingControl pending = null;
             if ("BLOCK_WS".equals(type)) pending = new PendingControl(type, "FUERA_SERVICIO");
             else if ("ACTIVATE_WS".equals(type)) pending = new PendingControl(type, "ACTIVADA");
             if (pending != null) pendingControls.put(id, pending);
-            if (publish(TOPIC_ORDENES_WS, Integer.toString(id), cmd)) {
-                System.out.println(type + " enviada a WS " + id + "; la WS no se considera en el nuevo estado hasta recibir confirmación.");
-            } else {
-                if (pending != null) pendingControls.remove(id, pending);
-                System.err.println("No se pudo confirmar el envío de " + type + " a WS " + id + ".");
-            }
+
+            queueCommand(id, type, "CENTRAL-" + UUID.randomUUID(), 0, 0);
+            System.out.println(type + " encolada para WS " + id
+                    + "; la WS no se considera en el nuevo estado hasta recibir confirmación.");
         }
+    }
+
+    private void publishHeartbeatSafely() {
+        if (!running.get()) return;
+        try {
+            Map<String, Object> latido = new LinkedHashMap<>();
+            latido.put("type", "CENTRAL_HEARTBEAT");
+            latido.put("stations", sessions.size());
+            latido.put("createdAt", Instant.now().toString());
+            producer.send(new ProducerRecord<>(TOPIC_LATIDO, "central", JSON.writeValueAsString(latido)));
+        } catch (Exception e) {
+            // Kafka puede estar temporalmente caído; el latido se reintenta en el
+            // siguiente ciclo y no debe afectar al servicio de sockets de CENTRAL.
+        }
+    }
+
+    // ------------------------------------------------------------ Panel / consola
+
+    /** Refresca el panel sólo cuando cambia algo relevante (evita ruido en la terminal). */
+    public void panelSiCambia() { mostrarPanel(false); }
+
+    public void mostrarPanel(boolean forzar) {
+        List<Map<String,Object>> estaciones = db.listarWS();
+        StringBuilder firma = new StringBuilder();
+        StringBuilder texto = new StringBuilder();
+        texto.append("\n================= PANEL WM_CENTRAL (").append(hora()).append(") =================\n");
+        texto.append(String.format("%-4s %-24s %-32s %-14s %s%n",
+                "ID", "UBICACIÓN", "ESTADO", "AGUA TOTAL", "DETALLE"));
+        texto.append("--------------------------------------------------------------------------------\n");
+        if (estaciones.isEmpty()) texto.append("No hay estaciones WS registradas.\n");
+
+        for (Map<String,Object> fila : estaciones) {
+            int id = number(fila.get("wsId"), -1);
+            if (id <= 0) continue;
+            HiloCentral sesion = sessions.get(id);
+            StationSnapshot snapshot = latestStates.get(id);
+            boolean enLinea = sesion != null && sesion.isSessionOpen() && hasFreshStatus(id) && snapshot != null;
+            String estado = enLinea ? snapshot.state : "DESCONECTADA";
+            double aguaDb = numero(fila.get("volumeLitres"), 0);
+            double agua = enLinea ? Math.max(snapshot.volumeLitres, aguaDb) : aguaDb;
+
+            String detalle = "";
+            if ("REGANDO".equals(estado)) {
+                ActiveRiego activo = activeByWs.get(id);
+                double servicio = activo != null ? Math.max(0, snapshot.volumeLitres - activo.baseVolume)
+                        : snapshot.volumeLitres;
+                detalle = "Caudal: " + fmt(snapshot.flowLMin) + " L/min | Servicio: " + fmt(servicio)
+                        + " L | Operario: " + (snapshot.operatorId > 0 ? snapshot.operatorId : "-");
+            } else if ("FUGA".equals(estado)) {
+                detalle = "Fuga/avería detectada; riego detenido";
+            } else if ("FUERA_SERVICIO".equals(estado)) {
+                detalle = "Out of Service";
+            } else if ("DESCONECTADA".equals(estado)) {
+                detalle = "Sin conexión con el monitor";
+            }
+
+            texto.append(String.format("%-4d %-24s %s %-14s %s%n",
+                    id, acotar(String.valueOf(fila.get("location")), 24),
+                    estadoColoreado(estado), fmt(agua) + " L", detalle));
+            firma.append(id).append('|').append(estado).append('|')
+                    .append(Math.round(agua * 10)).append('|')
+                    .append(enLinea ? Math.round(snapshot.flowLMin * 10) : 0).append('|')
+                    .append(enLinea ? snapshot.operatorId : -1).append(';');
+        }
+        texto.append("================================================================================\n");
+
+        if (forzar || !firma.toString().equals(firmaPanel)) {
+            firmaPanel = firma.toString();
+            System.out.print(texto);
+        }
+    }
+
+    private static String estadoColoreado(String estado) {
+        String etiqueta;
+        String color;
+        switch (estado.toUpperCase(Locale.ROOT)) {
+            case "ACTIVADA": etiqueta = "Available"; color = "\u001B[32m"; break;
+            case "REGANDO": etiqueta = "Watering"; color = "\u001B[1;5;32m"; break;
+            case "FUGA": etiqueta = "Leak"; color = "\u001B[31m"; break;
+            case "FUERA_SERVICIO": etiqueta = "Out of Service"; color = "\u001B[38;5;208m"; break;
+            case "DESCONECTADA": etiqueta = "Disconnected"; color = "\u001B[90m"; break;
+            default: etiqueta = estado; color = "";
+        }
+        return color + pad(etiqueta, 32) + "\u001B[0m";
+    }
+
+    private static String pad(String texto, int ancho) {
+        if (texto.length() >= ancho) return texto;
+        StringBuilder sb = new StringBuilder(texto);
+        while (sb.length() < ancho) sb.append(' ');
+        return sb.toString();
+    }
+
+    private static String acotar(String texto, int maximo) {
+        if (texto == null) return "";
+        if (texto.length() <= maximo) return texto;
+        return texto.substring(0, Math.max(0, maximo - 3)) + "...";
+    }
+
+    private static String hora() {
+        return java.time.LocalTime.now().withNano(0).toString();
+    }
+
+    private static String fmt(double v) { return String.format(Locale.ROOT, "%.2f", v); }
+
+    private static double numero(Object valor, double porDefecto) {
+        if (valor instanceof Number) return ((Number) valor).doubleValue();
+        try { return Double.parseDouble(String.valueOf(valor)); }
+        catch (Exception e) { return porDefecto; }
     }
 
     public List<Map<String,Object>> listarWS() { return db.listarWS(); }
@@ -854,6 +1013,7 @@ public final class CentralService implements AutoCloseable {
     private static final class PendingControl {
         final String commandType;
         final String expectedState;
+        final long createdAtMillis = System.currentTimeMillis();
         PendingControl(String commandType, String expectedState) {
             this.commandType = commandType;
             this.expectedState = expectedState;
@@ -867,6 +1027,9 @@ public final class CentralService implements AutoCloseable {
         volatile boolean started; volatile long startedAtMillis;
         volatile boolean commandSent; volatile long commandSentAtMillis;
         volatile double lastFlow; volatile double lastVolume; volatile long lastElapsed;
+        // Volumen total de la estación en el momento de autorizar el riego: permite
+        // informar al operario del consumo exacto de SU servicio.
+        volatile double baseVolume;
         ActiveRiego(String requestId, int operatorId, int wsId, int durationSeconds) {
             this.requestId=requestId; this.operatorId=operatorId; this.wsId=wsId;
             this.durationSeconds=durationSeconds;

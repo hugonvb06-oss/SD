@@ -124,7 +124,7 @@ public final class BaseDatos implements AutoCloseable {
     }
 
     public synchronized boolean actualizarAguaWS(int id, double cantidad) {
-        try (PreparedStatement ps = conexion.prepareStatement("UPDATE WS SET cant_agua=?, ultima_conexion=? WHERE id_ws=?")) {
+        try (PreparedStatement ps = conexion.prepareStatement("UPDATE WS SET cant_agua=MAX(cant_agua,?), ultima_conexion=? WHERE id_ws=?")) {
             ps.setDouble(1, Math.max(0, cantidad)); ps.setString(2, Instant.now().toString()); ps.setInt(3, id); return ps.executeUpdate() > 0;
         } catch (SQLException e) { System.err.println("Error actualizando volumen de WS: " + e.getMessage()); return false; }
     }
@@ -200,7 +200,7 @@ public final class BaseDatos implements AutoCloseable {
 
     public synchronized List<Map<String,Object>> listarSolicitudesNoTerminales() {
         List<Map<String,Object>> items = new ArrayList<>();
-        String sql = "SELECT request_id,operator_id,ws_id,duration_seconds,status,created_at FROM SolicitudRiego " +
+        String sql = "SELECT request_id,operator_id,ws_id,duration_seconds,status,created_at,updated_at FROM SolicitudRiego " +
                 "WHERE UPPER(status) NOT IN ('COMPLETED','REJECTED','FAILED','CANCELLED')";
         try (PreparedStatement ps = conexion.prepareStatement(sql); ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
@@ -211,6 +211,7 @@ public final class BaseDatos implements AutoCloseable {
                 m.put("durationSeconds", rs.getInt("duration_seconds"));
                 m.put("status", rs.getString("status"));
                 m.put("createdAt", rs.getString("created_at"));
+                m.put("updatedAt", rs.getString("updated_at"));
                 items.add(m);
             }
         } catch (SQLException e) { System.err.println("Error consultando solicitudes pendientes: " + e.getMessage()); }

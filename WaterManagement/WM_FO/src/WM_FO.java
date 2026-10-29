@@ -41,6 +41,7 @@ public final class WM_FO implements AutoCloseable {
     private final Scanner teclado;
 
     private KafkaOperatorClient kafka;
+    private Boolean ultimoEstadoCentral;
 
     private WM_FO(String ipBroker, int puertoBroker, int idOperador) {
         this.ipBroker = ipBroker;
@@ -126,6 +127,7 @@ public final class WM_FO implements AutoCloseable {
     }
 
     private void mostrarMenu() {
+        avisarCentral();
         System.out.println();
         System.out.println("--------------- MENÚ ---------------");
         System.out.println("1. Solicitar suministro manualmente");
@@ -133,6 +135,25 @@ public final class WM_FO implements AutoCloseable {
         System.out.println("3. Consultar WS disponibles");
         System.out.println("4. Salir");
         System.out.print("Selecciona una opción: ");
+    }
+
+    /** Avisa al operario cuando WM_Central deja de publicar latidos o se recupera. */
+    private void avisarCentral() {
+        if (kafka == null) return;
+        boolean vivo = kafka.isCentralAlive();
+        if (ultimoEstadoCentral == null) {
+            ultimoEstadoCentral = vivo;
+            if (!vivo) {
+                System.err.println("[CENTRAL] Todavía no se reciben latidos de WM_Central. "
+                        + "Si la central no está desplegada, no se podrán atender solicitudes.");
+            }
+            return;
+        }
+        if (vivo != ultimoEstadoCentral.booleanValue()) {
+            ultimoEstadoCentral = vivo;
+            if (vivo) System.out.println("[CENTRAL] Conexión con WM_Central restablecida.");
+            else System.err.println("Imposible conectar con WM_Central: no se reciben latidos de la central.");
+        }
     }
 
     private void solicitarServicioManual() {
@@ -267,11 +288,13 @@ public final class WM_FO implements AutoCloseable {
                     System.err.println("Timeout: han pasado " + timeout
                             + " segundos sin recibir una conclusión del servicio.");
                     System.err.println("Esto no cancela el riego en CENTRAL/WS; el resultado es desconocido.");
+                    avisarCentral();
                     return Resultado.DESCONOCIDO;
                 }
 
                 Map<String, Object> evento = kafka.esperarEvento(requestId,
                         Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
+                avisarCentral();
                 if (evento == null) {
                     continue;
                 }
@@ -370,6 +393,7 @@ public final class WM_FO implements AutoCloseable {
                 long remaining = deadline - System.nanoTime();
                 Map<String, Object> evento = kafka.esperarEvento(requestId,
                         Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
+                avisarCentral();
                 if (evento == null) {
                     continue;
                 }
@@ -505,20 +529,17 @@ public final class WM_FO implements AutoCloseable {
     }
 
     public static void main(String[] args) {
-        if (args.length < 3) {
-            System.out.println("Uso: java WM_FO <IP_BROKER> <PUERTO_BROKER> <ID_OPERARIO>");
-            System.out.println("Ejemplo local: java WM_FO localhost 9092 1");
-            return;
-        }
-
-        String ipBroker = args[0].trim();
+        String ipBroker;
         int puertoBroker;
         int idOperador;
         try {
-            puertoBroker = Integer.parseInt(args[1]);
-            idOperador = Integer.parseInt(args[2]);
+            ipBroker = (args.length >= 1 ? args[0] : env("WM_KAFKA_HOST", "localhost")).trim();
+            puertoBroker = Integer.parseInt((args.length >= 2 ? args[1] : env("WM_KAFKA_PORT", "9092")).trim());
+            idOperador = Integer.parseInt((args.length >= 3 ? args[2] : env("WM_FO_ID", "1")).trim());
         } catch (NumberFormatException e) {
             System.err.println("El puerto del broker y el ID del operario deben ser números enteros.");
+            System.err.println("Uso: java WM_FO [IP_BROKER] [PUERTO_BROKER] [ID_OPERARIO]");
+            System.err.println("También se admiten WM_KAFKA_HOST, WM_KAFKA_PORT y WM_FO_ID.");
             return;
         }
 
@@ -532,6 +553,11 @@ public final class WM_FO implements AutoCloseable {
         } catch (Exception e) {
             System.err.println("WM_FO se ha cerrado por un error: " + e.getMessage());
         }
+    }
+
+    private static String env(String nombre, String porDefecto) {
+        String v = System.getenv(nombre);
+        return v == null || v.trim().isEmpty() ? porDefecto : v;
     }
 
     private enum Resultado {

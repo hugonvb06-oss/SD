@@ -54,6 +54,9 @@ public final class KafkaOperatorClient implements AutoCloseable {
 
     public static final String TOPIC_SOLICITUDES = "wm.riego.solicitudes";
     public static final String TOPIC_RESPUESTAS = "wm.riego.respuestas";
+    public static final String TOPIC_LATIDO = "wm.central.latido";
+
+    private static final long CENTRAL_ALIVE_WINDOW_MS = 8_000L;
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final TypeReference<Map<String, Object>> MAP_TYPE =
@@ -80,6 +83,8 @@ public final class KafkaOperatorClient implements AutoCloseable {
     private volatile Thread consumerThread;
     private volatile boolean started;
     private volatile boolean closed;
+    private volatile long lastHeartbeatMillis;
+    private volatile long startedAtMillis;
 
     public KafkaOperatorClient(String bootstrapServers, int operatorId) {
         if (bootstrapServers == null || bootstrapServers.trim().isEmpty()) {
@@ -126,8 +131,19 @@ public final class KafkaOperatorClient implements AutoCloseable {
         }
 
         started = true;
+        startedAtMillis = System.currentTimeMillis();
         System.out.println("Kafka conectado. Consumidor listo para recibir respuestas.");
-        System.out.println("Topics: " + TOPIC_SOLICITUDES + " / " + TOPIC_RESPUESTAS);
+        System.out.println("Topics: " + TOPIC_SOLICITUDES + " / " + TOPIC_RESPUESTAS + " / " + TOPIC_LATIDO);
+    }
+
+    /**
+     * Indica si WM_Central sigue viva según los latidos publicados por Kafka.
+     * Permite avisar al operario aunque el broker de Kafka siga funcionando.
+     */
+    public boolean isCentralAlive() {
+        if (!started || closed) return false;
+        long reference = Math.max(lastHeartbeatMillis, startedAtMillis);
+        return System.currentTimeMillis() - reference <= CENTRAL_ALIVE_WINDOW_MS;
     }
 
     public String solicitarRiego(int wsId, int durationSeconds) throws Exception {
@@ -228,7 +244,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
                 try (KafkaConsumer<String, String> kafkaConsumer =
                              new KafkaConsumer<>(crearConfiguracionConsumidor())) {
                     consumer = kafkaConsumer;
-                    kafkaConsumer.subscribe(Collections.singletonList(TOPIC_RESPUESTAS));
+                    kafkaConsumer.subscribe(Arrays.asList(TOPIC_RESPUESTAS, TOPIC_LATIDO));
 
                     while (running.get()) {
                         ConsumerRecords<String, String> records =
@@ -251,7 +267,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
 
                         if (!records.isEmpty()) {
                             for (ConsumerRecord<String, String> record : records) {
-                                dispatch(record.value());
+                                dispatch(record.topic(), record.value());
                             }
                             // Confirmar solo después de colocar los eventos en sus colas.
                             // En caso de fallo podría haber una redelivery, que se tolera.
@@ -285,7 +301,11 @@ public final class KafkaOperatorClient implements AutoCloseable {
         }
     }
 
-    private void dispatch(String json) {
+    private void dispatch(String topic, String json) {
+        if (TOPIC_LATIDO.equals(topic)) {
+            lastHeartbeatMillis = System.currentTimeMillis();
+            return;
+        }
         try {
             Map<String, Object> event = JSON.readValue(json, MAP_TYPE);
             String requestId = asString(event.get("requestId"));
@@ -323,7 +343,7 @@ public final class KafkaOperatorClient implements AutoCloseable {
         properties.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "15000");
 
         try (AdminClient admin = AdminClient.create(properties)) {
-            List<String> topics = Arrays.asList(TOPIC_SOLICITUDES, TOPIC_RESPUESTAS);
+            List<String> topics = Arrays.asList(TOPIC_SOLICITUDES, TOPIC_RESPUESTAS, TOPIC_LATIDO);
             for (String topic : topics) {
                 boolean verified = false;
                 for (int attempt = 1; attempt <= 3 && !verified; attempt++) {

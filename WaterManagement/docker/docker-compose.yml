@@ -1,0 +1,104 @@
+# Despliegue local completo: Kafka (KRaft) + WM_Central + WM_WS (monitor y motor
+# separados para poder reiniciarlos de forma independiente) + WM_FO.
+#
+#   cd WaterManagement/docker
+#   docker compose up -d --build          # infraestructura
+#   docker compose run --rm fo            # operario interactivo
+#
+# En el laboratorio lo habitual es desplegar solo WM_WS y WM_FO y apuntar
+# WM_CENTRAL_HOST / WM_KAFKA_HOST a la central publicada en la nube.
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    hostname: kafka
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+    ports:
+      - "19092:9092"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  central:
+    build:
+      context: ..
+      dockerfile: WM_Central/Dockerfile
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      WM_CENTRAL_PORT: "5000"
+      WM_KAFKA_HOST: kafka
+      WM_KAFKA_PORT: "9092"
+      WM_DB_PATH: /data/watermanagement.db
+      # Lista blanca opcional de WS autorizadas, por ejemplo "1,2,7".
+      WM_WS_ALLOWED_IDS: ""
+    ports:
+      - "5000:5000"
+    volumes:
+      - central-data:/data
+    restart: unless-stopped
+
+  ws-monitor:
+    build:
+      context: ..
+      dockerfile: WM_WS/Dockerfile
+    depends_on:
+      - central
+    environment:
+      WM_ROLE: monitor
+      WM_WS_ID: "1"
+      WM_WS_LOCATION: "Jardin principal"
+      WM_WS_FLOW: "12.0"
+      WM_CENTRAL_HOST: central
+      WM_CENTRAL_PORT: "5000"
+      WM_MONITOR_PORT: "6000"
+    restart: unless-stopped
+
+  ws-engine:
+    build:
+      context: ..
+      dockerfile: WM_WS/Dockerfile
+    depends_on:
+      - ws-monitor
+    environment:
+      WM_ROLE: engine
+      WM_MONITOR_HOST: ws-monitor
+      WM_MONITOR_PORT: "6000"
+      WM_WS_STATE_DIR: /data
+    volumes:
+      - ws1-state:/data
+    restart: unless-stopped
+
+  fo:
+    build:
+      context: ..
+      dockerfile: WM_FO/Dockerfile
+    depends_on:
+      - central
+    environment:
+      WM_KAFKA_HOST: kafka
+      WM_KAFKA_PORT: "9092"
+      WM_FO_ID: "1"
+    stdin_open: true
+    tty: true
+    profiles: ["fo"]
+
+volumes:
+  kafka-data:
+  central-data:
+  ws1-state:

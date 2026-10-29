@@ -9,6 +9,7 @@ import java.net.SocketAddress;
 import java.net.SocketTimeoutException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 /** Atiende una conexión persistente de monitor WS. Un hilo por estación conectada. */
 public final class HiloCentral extends Thread {
@@ -31,7 +32,7 @@ public final class HiloCentral extends Thread {
     public void run() {
         try {
             socket.setKeepAlive(true);
-            socket.setSoTimeout(10_000); // se espera heartbeat/estado al menos cada pocos segundos
+            socket.setSoTimeout(6_000); // el monitor envía estado cada segundo
             in = new BufferedInputStream(socket.getInputStream());
             out = new BufferedOutputStream(socket.getOutputStream());
 
@@ -53,7 +54,16 @@ public final class HiloCentral extends Thread {
                 String message = receiveClientFrame();
                 if (message == null) break; // EOT del monitor
                 String answer = processMessage(message);
-                sendAnswerAndWaitAck(answer);
+                List<String> commands = central.takeCommands(wsId);
+                String respuesta = appendCommands(answer, commands);
+                try {
+                    sendAnswerAndWaitAck(respuesta);
+                } catch (IOException e) {
+                    // Las órdenes no llegaron a confirmarse: se reencolan para la
+                    // siguiente sesión en lugar de perderse.
+                    central.requeueCommands(wsId, commands);
+                    throw e;
+                }
             }
         } catch (SocketTimeoutException e) {
             if (!closed) System.err.println("Timeout de comunicación con WS " + wsId + "; se marca desconectada.");
@@ -106,6 +116,13 @@ public final class HiloCentral extends Thread {
         throw new IOException("La WS rechazó tres veces una respuesta de CENTRAL");
     }
 
+    private static String appendCommands(String answer, List<String> commands) {
+        if (commands == null || commands.isEmpty()) return answer;
+        StringBuilder sb = new StringBuilder(answer == null ? "" : answer);
+        for (String command : commands) sb.append("#CMD#").append(command);
+        return sb.toString();
+    }
+
     private String processHello(String message) {
         String[] h = message.split("#", -1);
         if (h.length != 4 || !"HELLO".equals(h[0])) {
@@ -118,6 +135,9 @@ public final class HiloCentral extends Thread {
         double nominalFlow = parseDouble(h[3], -1);
         if (wsId <= 0 || location.trim().isEmpty() || nominalFlow <= 0) {
             return "HELLO_OK#KO#ID, ubicación o caudal inválidos";
+        }
+        if (!central.puedeRegistrar(wsId)) {
+            return "HELLO_OK#KO#WS no registrada en CENTRAL";
         }
         if (!central.registerStation(wsId, location, nominalFlow, this)) {
             return "HELLO_OK#KO#No se pudo registrar la estación en SQLite";
