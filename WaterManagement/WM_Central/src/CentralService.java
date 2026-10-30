@@ -732,14 +732,14 @@ public final class CentralService implements AutoCloseable {
     }
 
     /** Inicia un riego administrativo en una WS concreta o en todas las WS conectadas (wsId=0). */
-    public void adminRiego(int wsId, int durationSeconds) {
+    public boolean adminRiego(int wsId, int durationSeconds) {
         if (wsId < 0) {
             System.out.println("El ID de WS debe ser positivo o 0 para todas las WS conectadas.");
-            return;
+            return false;
         }
         if (durationSeconds < 1 || durationSeconds > 86400) {
             System.out.println("Duración inválida (1-86400 s).");
-            return;
+            return false;
         }
 
         List<Integer> targets = new ArrayList<>();
@@ -754,12 +754,14 @@ public final class CentralService implements AutoCloseable {
         Collections.sort(targets);
         if (targets.isEmpty()) {
             System.out.println("No hay WS conectadas y con estado reciente para iniciar el riego.");
-            return;
+            return false;
         }
-        for (Integer id : targets) adminRiegoUnaWS(id, durationSeconds);
+        boolean enviado = false;
+        for (Integer id : targets) enviado |= adminRiegoUnaWS(id, durationSeconds);
+        return enviado;
     }
 
-    private void adminRiegoUnaWS(int wsId, int durationSeconds) {
+    private boolean adminRiegoUnaWS(int wsId, int durationSeconds) {
         Map<String, Object> ws = db.obtenerWS(wsId);
         HiloCentral session = sessions.get(wsId);
         StationSnapshot snapshot = latestStates.get(wsId);
@@ -767,19 +769,19 @@ public final class CentralService implements AutoCloseable {
                 session == null || !session.isSessionOpen() || !hasFreshStatus(wsId) ||
                 snapshot == null || !"ACTIVADA".equals(snapshot.state)) {
             System.out.println("WS " + wsId + ": omitida; no existe, no está conectada o no está ACTIVADA.");
-            return;
+            return false;
         }
 
         ActiveRiego active = new ActiveRiego("CENTRAL-" + UUID.randomUUID(), 0, wsId, durationSeconds);
         active.baseVolume = snapshot.volumeLitres;
         if (!db.guardarSolicitudSiNueva(active.requestId, 0, wsId, durationSeconds)) {
             System.out.println("WS " + wsId + ": no se pudo guardar la solicitud administrativa; no se iniciará.");
-            return;
+            return false;
         }
         ActiveRiego previous = activeByWs.putIfAbsent(wsId, active);
         if (previous != null) {
             finish(active, "REJECTED", "La WS ya tiene un servicio en curso.");
-            return;
+            return false;
         }
         activeByRequest.put(active.requestId, active);
         db.actualizarEstadoSolicitud(active.requestId, "AUTHORIZED", null);
@@ -789,17 +791,18 @@ public final class CentralService implements AutoCloseable {
         active.commandSent = true;
         active.commandSentAtMillis = System.currentTimeMillis();
         System.out.println("Riego administrativo encolado para WS " + wsId + ".");
+        return true;
     }
 
     /** Envía una orden a una WS concreta o a todas las WS conectadas (wsId=0). */
-    public void adminOrden(String type, int wsId) {
+    public boolean adminOrden(String type, int wsId) {
         if (!Arrays.asList("BLOCK_WS", "ACTIVATE_WS", "STOP_IRRIGATION").contains(type)) {
             System.out.println("Orden administrativa desconocida: " + type);
-            return;
+            return false;
         }
         if (wsId < 0) {
             System.out.println("El ID de WS debe ser positivo o 0 para todas las WS conectadas.");
-            return;
+            return false;
         }
 
         List<Integer> ids = new ArrayList<>();
@@ -814,7 +817,7 @@ public final class CentralService implements AutoCloseable {
         Collections.sort(ids);
         if (ids.isEmpty()) {
             System.out.println("No hay WS conectadas y con estado reciente para esa orden.");
-            return;
+            return false;
         }
 
         for (Integer id : ids) {
@@ -827,6 +830,7 @@ public final class CentralService implements AutoCloseable {
             System.out.println(type + " encolada para WS " + id
                     + "; la WS no se considera en el nuevo estado hasta recibir confirmación.");
         }
+        return true;
     }
 
     private void publishHeartbeatSafely() {
@@ -940,6 +944,42 @@ public final class CentralService implements AutoCloseable {
 
     public List<Map<String,Object>> listarWS() { return db.listarWS(); }
 
+    /**
+     * Vista de solo lectura para la interfaz gráfica: reúne la información de SQLite y
+     * del último estado recibido de cada monitor. El estado efectivo de una estación
+     * sin sesión válida es siempre DESCONECTADA.
+     */
+    public List<StationView> vistaEstaciones() {
+        List<Map<String,Object>> estaciones = db.listarWS();
+        List<StationView> vista = new ArrayList<>();
+        for (Map<String,Object> fila : estaciones) {
+            int id = number(fila.get("wsId"), -1);
+            if (id <= 0) continue;
+
+            HiloCentral sesion = sessions.get(id);
+            StationSnapshot snapshot = latestStates.get(id);
+            boolean enLinea = sesion != null && sesion.isSessionOpen() && hasFreshStatus(id) && snapshot != null;
+
+            String estado = enLinea ? snapshot.state : "DESCONECTADA";
+            double aguaDb = numero(fila.get("volumeLitres"), 0);
+            double agua = enLinea ? Math.max(snapshot.volumeLitres, aguaDb) : aguaDb;
+            double caudal = enLinea ? snapshot.flowLMin : 0;
+            long segundos = enLinea ? snapshot.elapsedSeconds : 0;
+            int operario = enLinea ? snapshot.operatorId : 0;
+            String requestId = enLinea ? snapshot.requestId : null;
+
+            ActiveRiego activo = activeByWs.get(id);
+            double servicio = enLinea && activo != null
+                    ? Math.max(0, snapshot.volumeLitres - activo.baseVolume) : 0;
+
+            PendingControl pendiente = pendingControls.get(id);
+            vista.add(new StationView(id, String.valueOf(fila.get("location")), estado, enLinea,
+                    agua, caudal, servicio, segundos, operario, requestId,
+                    pendiente == null ? null : pendiente.commandType));
+        }
+        return vista;
+    }
+
     private boolean hasFreshStatus(int wsId) {
         StationSnapshot snapshot = latestStates.get(wsId);
         return snapshot != null && System.currentTimeMillis() - snapshot.seenAtMillis <= MAX_STATION_STATUS_AGE_MS;
@@ -1036,6 +1076,37 @@ public final class CentralService implements AutoCloseable {
             this.lastVolume=0.0;
         }
     }
+    /** Datos de una estación para la vista gráfica de WM_Central. */
+    public static final class StationView {
+        public final int wsId;
+        public final String location;
+        public final String state;
+        public final boolean online;
+        public final double volumeLitres;
+        public final double flowLMin;
+        public final double serviceLitres;
+        public final long elapsedSeconds;
+        public final int operatorId;
+        public final String requestId;
+        public final String pendingControl;
+
+        StationView(int wsId, String location, String state, boolean online,
+                    double volumeLitres, double flowLMin, double serviceLitres,
+                    long elapsedSeconds, int operatorId, String requestId, String pendingControl) {
+            this.wsId = wsId;
+            this.location = location;
+            this.state = state;
+            this.online = online;
+            this.volumeLitres = volumeLitres;
+            this.flowLMin = flowLMin;
+            this.serviceLitres = serviceLitres;
+            this.elapsedSeconds = elapsedSeconds;
+            this.operatorId = operatorId;
+            this.requestId = requestId;
+            this.pendingControl = pendingControl;
+        }
+    }
+
     private static final class StationSnapshot {
         final int wsId; final String state; final double flowLMin; final double volumeLitres;
         final long elapsedSeconds; final String requestId; final int operatorId; final long seenAtMillis;

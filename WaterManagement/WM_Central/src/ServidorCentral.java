@@ -8,6 +8,7 @@ import java.nio.file.Paths;
 import java.util.List;
 import java.util.Map;
 import java.util.Scanner;
+import javax.swing.SwingUtilities;
 
 /**
  * Punto de entrada de WM_Central.
@@ -66,9 +67,17 @@ public final class ServidorCentral {
             System.out.println("SQLite                   : " + dbPath);
             System.out.println("WS autorizadas           : " + env("WM_WS_ALLOWED_IDS", "(todas las válidas)"));
             System.out.println("====================================================");
-            central.mostrarPanel(true);
-            iniciarPanel(central);
-            startAdminConsole(central);
+
+            boolean graphical = false;
+            if (UiSupport.guiEnabled()) {
+                graphical = launchGui(servicio, socketPort, kafkaHost, kafkaPort, dbPath);
+            }
+            if (!graphical) {
+                // Sin escritorio (Docker, servidores) se mantiene el panel y el menú de consola.
+                central.mostrarPanel(true);
+                iniciarPanel(central);
+                startAdminConsole(central);
+            }
 
             try (ServerSocket server = new ServerSocket()) {
                 server.setReuseAddress(true);
@@ -92,6 +101,22 @@ public final class ServidorCentral {
         } finally {
             if (central != null) central.close();
             if (db != null) db.close();
+        }
+    }
+
+    private static boolean launchGui(CentralService central, int socketPort, String kafkaHost,
+                                     int kafkaPort, String dbPath) {
+        try {
+            SwingUtilities.invokeAndWait(() -> {
+                CentralFrame frame = new CentralFrame(central, socketPort, kafkaHost, kafkaPort, dbPath);
+                frame.setVisible(true);
+            });
+            System.out.println("Interfaz gráfica de WM_Central iniciada (WM_GUI=false para usar la consola).");
+            return true;
+        } catch (Throwable t) {
+            System.err.println("No se pudo iniciar la interfaz gráfica de WM_Central: "
+                    + t.getMessage() + ". Se usará la consola.");
+            return false;
         }
     }
 

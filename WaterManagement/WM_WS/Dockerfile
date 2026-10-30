@@ -25,7 +25,8 @@ ENV WM_ROLE=both \
     WM_CENTRAL_HOST=central \
     WM_CENTRAL_PORT=5000 \
     WM_WS_ALLOWED_IDS="" \
-    WM_WS_STATE_DIR=/data
+    WM_WS_STATE_DIR=/data \
+    WM_GUI=false
 
 RUN mkdir -p /data
 VOLUME ["/data"]

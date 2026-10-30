@@ -47,6 +47,7 @@ services:
       WM_DB_PATH: /data/watermanagement.db
       # Lista blanca opcional de WS autorizadas, por ejemplo "1,2,7".
       WM_WS_ALLOWED_IDS: ""
+      WM_GUI: "false"
     ports:
       - "5000:5000"
     volumes:
@@ -67,6 +68,7 @@ services:
       WM_CENTRAL_HOST: central
       WM_CENTRAL_PORT: "5000"
       WM_MONITOR_PORT: "6000"
+      WM_GUI: "false"
     restart: unless-stopped
 
   ws-engine:
@@ -80,6 +82,7 @@ services:
       WM_MONITOR_HOST: ws-monitor
       WM_MONITOR_PORT: "6000"
       WM_WS_STATE_DIR: /data
+      WM_GUI: "false"
     volumes:
       - ws1-state:/data
     restart: unless-stopped
@@ -94,6 +97,7 @@ services:
       WM_KAFKA_HOST: kafka
       WM_KAFKA_PORT: "9092"
       WM_FO_ID: "1"
+      WM_GUI: "false"
     stdin_open: true
     tty: true
     profiles: ["fo"]

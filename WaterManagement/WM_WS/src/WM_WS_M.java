@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import javax.swing.SwingUtilities;
 
 /**
  * WM_WS_M - Monitor de una estación WS.
@@ -95,10 +96,21 @@ public final class WM_WS_M {
         WM_WS_M monitor = new WM_WS_M(p.puertoMotor, p.ipCentral, p.puertoCentral, p.wsId,
                 p.ubicacion, p.caudal, p.intervaloMs);
         Runtime.getRuntime().addShutdownHook(new Thread(monitor::detener, "wm-ws-monitor-shutdown"));
-        monitor.iniciar();
+
+        boolean graphical = false;
+        if (UiSupport.guiEnabled()) {
+            try {
+                SwingUtilities.invokeAndWait(() -> new WSMonitorFrame(monitor).setVisible(true));
+                graphical = true;
+            } catch (Throwable t) {
+                System.err.println("No se pudo iniciar la interfaz gráfica del monitor: "
+                        + t.getMessage() + ". Se usará la consola.");
+            }
+        }
+        monitor.iniciar(!graphical);
     }
 
-    private void iniciar() {
+    private void iniciar(boolean conConsola) {
         System.out.println("=================================================");
         System.out.println(" WM_WS_M - MONITOR DE ESTACIÓN");
         System.out.println("=================================================");
@@ -111,7 +123,7 @@ public final class WM_WS_M {
         System.out.println("=================================================");
 
         motor.start();
-        iniciarConsola();
+        if (conConsola) iniciarConsola();
 
         long siguiente = System.currentTimeMillis();
         while (ejecutando) {
@@ -319,12 +331,41 @@ public final class WM_WS_M {
     }
 
     private void enviarComandoLocal(String tipo, int operario) {
-        if (!motor.estaConectado()) {
-            System.out.println("No se puede enviar la orden: el motor no está conectado.");
-            return;
+        String error = enviarComandoMonitor(tipo);
+        System.out.println(error == null ? "Orden " + tipo + " enviada al motor." : error);
+    }
+
+    /** Inicia un riego local sin usar la consola. Devuelve null si se encoló correctamente. */
+    public String solicitarRiegoLocal(int duracion) {
+        if (!centralOnline) {
+            return "No se puede iniciar un riego: Imposible conectar con WM_Central.";
         }
-        motor.encolarComando(tipo + "|LOCAL-" + UUID.randomUUID() + "|" + operario + "|0");
-        System.out.println("Orden " + tipo + " enviada al motor.");
+        if (!motor.estaDisponible()) {
+            return "No se puede iniciar un riego: la estación está Averiada (motor no disponible).";
+        }
+        if (duracion < 1 || duracion > 86400) {
+            return "La duración debe estar entre 1 y 86400 segundos.";
+        }
+        motor.encolarComando("START_IRRIGATION|LOCAL-" + UUID.randomUUID() + "|0|" + duracion);
+        return null;
+    }
+
+    /** Encola una orden local (BLOCK_WS, ACTIVATE_WS o STOP_IRRIGATION). */
+    public String enviarComandoMonitor(String tipo) {
+        if (!motor.estaConectado()) {
+            return "No se puede enviar la orden: el motor no está conectado.";
+        }
+        motor.encolarComando(tipo + "|LOCAL-" + UUID.randomUUID() + "|0|0");
+        return null;
+    }
+
+    /** Fotografía del estado para la interfaz gráfica. */
+    public MonitorView vistaMonitor() {
+        EstadoMotor estado = motor.estadoParaCentral();
+        return new MonitorView(wsId, ubicacion, caudalNominal, centralOnline,
+                motor.estaConectado(), motor.sinRespuesta(), estado.estado,
+                estado.caudal, estado.volumen, estado.segundos,
+                estado.requestId, estado.operario, ultimoAckCentral);
     }
 
     // ---------------------------------------------------------------- Panel
@@ -362,7 +403,7 @@ public final class WM_WS_M {
         }
     }
 
-    private void detener() {
+    void detener() {
         ejecutando = false;
         motor.detener();
         cerrarSocketCentral();
@@ -401,6 +442,42 @@ public final class WM_WS_M {
     }
 
     // ---------------------------------------------------------------- Motor
+
+    /** Datos de la estación para la interfaz gráfica del monitor. */
+    public static final class MonitorView {
+        public final int wsId;
+        public final String location;
+        public final double nominalFlow;
+        public final boolean centralOnline;
+        public final boolean engineConnected;
+        public final boolean engineNoResponse;
+        public final String engineState;
+        public final double flowLMin;
+        public final double volumeLitres;
+        public final long elapsedSeconds;
+        public final String requestId;
+        public final int operatorId;
+        public final String lastCentralAck;
+
+        MonitorView(int wsId, String location, double nominalFlow, boolean centralOnline,
+                    boolean engineConnected, boolean engineNoResponse, String engineState,
+                    double flowLMin, double volumeLitres, long elapsedSeconds,
+                    String requestId, int operatorId, String lastCentralAck) {
+            this.wsId = wsId;
+            this.location = location;
+            this.nominalFlow = nominalFlow;
+            this.centralOnline = centralOnline;
+            this.engineConnected = engineConnected;
+            this.engineNoResponse = engineNoResponse;
+            this.engineState = engineState;
+            this.flowLMin = flowLMin;
+            this.volumeLitres = volumeLitres;
+            this.elapsedSeconds = elapsedSeconds;
+            this.requestId = requestId;
+            this.operatorId = operatorId;
+            this.lastCentralAck = lastCentralAck;
+        }
+    }
 
     /** Estado agregado que se envía a WM_Central. */
     static final class EstadoMotor {

@@ -19,6 +19,7 @@ COPY --from=build /src/target/wm-fo.jar ./wm-fo.jar
 ENV WM_KAFKA_HOST=kafka \
     WM_KAFKA_PORT=9092 \
     WM_FO_ID=1 \
-    WM_FO_MANAGE_TOPICS=true
+    WM_FO_MANAGE_TOPICS=true \
+    WM_GUI=false
 
 ENTRYPOINT ["java", "-jar", "/app/wm-fo.jar"]

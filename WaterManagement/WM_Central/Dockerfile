@@ -18,7 +18,8 @@ ENV WM_CENTRAL_PORT=5000 \
     WM_KAFKA_HOST=kafka \
     WM_KAFKA_PORT=9092 \
     WM_DB_PATH=/data/watermanagement.db \
-    WM_WS_ALLOWED_IDS=""
+    WM_WS_ALLOWED_IDS="" \
+    WM_GUI=false
 
 RUN mkdir -p /data
 VOLUME ["/data"]

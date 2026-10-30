@@ -14,6 +14,7 @@ import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Properties;
 import java.util.Scanner;
+import javax.swing.SwingUtilities;
 
 /**
  * WM_WS_E - Motor (engine) de una estación WS.
@@ -96,10 +97,21 @@ public final class WM_WS_E {
 
         WM_WS_E motor = new WM_WS_E(ip, puerto, dir);
         Runtime.getRuntime().addShutdownHook(new Thread(motor::detener, "wm-ws-engine-shutdown"));
-        motor.iniciar();
+
+        boolean graphical = false;
+        if (UiSupport.guiEnabled()) {
+            try {
+                SwingUtilities.invokeAndWait(() -> new WSEngineFrame(motor).setVisible(true));
+                graphical = true;
+            } catch (Throwable t) {
+                System.err.println("No se pudo iniciar la interfaz gráfica del motor: "
+                        + t.getMessage() + ". Se usará la consola.");
+            }
+        }
+        motor.iniciar(!graphical);
     }
 
-    private void iniciar() {
+    private void iniciar(boolean conConsola) {
         System.out.println("=================================================");
         System.out.println(" WM_WS_E - MOTOR DE ESTACIÓN");
         System.out.println("=================================================");
@@ -108,7 +120,7 @@ public final class WM_WS_E {
         System.out.println("Teclas: K=avería KO | S=motor sin respuesta | E=estado | Q=salir");
         System.out.println("=================================================");
 
-        iniciarConsola();
+        if (conConsola) iniciarConsola();
         iniciarReloj();
 
         while (ejecutando) {
@@ -397,7 +409,7 @@ public final class WM_WS_E {
         consola.start();
     }
 
-    private void alternarKo() {
+    public void alternarKo() {
         synchronized (lock) {
             ko = !ko;
             if (ko) {
@@ -412,7 +424,7 @@ public final class WM_WS_E {
         imprimirEstado();
     }
 
-    private void alternarSinRespuesta() {
+    public void alternarSinRespuesta() {
         synchronized (lock) {
             sinRespuesta = !sinRespuesta;
             if (sinRespuesta) {
@@ -425,6 +437,28 @@ public final class WM_WS_E {
             guardar();
         }
         imprimirEstado();
+    }
+
+    /** Fotografía del motor para la interfaz gráfica. */
+    public EngineView vistaMotor() {
+        synchronized (lock) {
+            String estado;
+            if (ko || sinRespuesta || !monitorConectado) estado = "FUGA";
+            else if (activo != null) estado = "REGANDO";
+            else if (bloqueada) estado = "FUERA_SERVICIO";
+            else estado = "ACTIVADA";
+
+            double servicio = activo != null ? activo.servicioLitros : 0;
+            long segundos = activo != null ? activo.elapsedSeconds() : 0;
+            int operario = activo != null ? activo.operario
+                    : (pendiente != null ? pendiente.operario : 0);
+            String requestId = activo != null ? activo.requestId
+                    : (pendiente != null ? pendiente.requestId : null);
+
+            return new EngineView(wsId, ubicacion, caudalNominal, monitorConectado, ko,
+                    sinRespuesta, bloqueada, estado, totalLitros, servicio, segundos,
+                    operario, requestId, pendiente == null ? null : pendiente.requestId);
+        }
     }
 
     private void imprimirEstado() {
@@ -528,7 +562,7 @@ public final class WM_WS_E {
         }
     }
 
-    private void detener() {
+    public void detener() {
         ejecutando = false;
         synchronized (lock) {
             if (activo != null) finalizar("Cierre del motor");
@@ -570,6 +604,44 @@ public final class WM_WS_E {
 
     private static void dormir(long ms) {
         try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
+    /** Datos del motor para la interfaz gráfica. */
+    public static final class EngineView {
+        public final int wsId;
+        public final String location;
+        public final double nominalFlow;
+        public final boolean monitorConnected;
+        public final boolean ko;
+        public final boolean noResponse;
+        public final boolean blocked;
+        public final String state;
+        public final double totalLitres;
+        public final double serviceLitres;
+        public final long elapsedSeconds;
+        public final int operatorId;
+        public final String requestId;
+        public final String pendingRequestId;
+
+        EngineView(int wsId, String location, double nominalFlow, boolean monitorConnected,
+                   boolean ko, boolean noResponse, boolean blocked, String state,
+                   double totalLitres, double serviceLitres, long elapsedSeconds,
+                   int operatorId, String requestId, String pendingRequestId) {
+            this.wsId = wsId;
+            this.location = location;
+            this.nominalFlow = nominalFlow;
+            this.monitorConnected = monitorConnected;
+            this.ko = ko;
+            this.noResponse = noResponse;
+            this.blocked = blocked;
+            this.state = state;
+            this.totalLitres = totalLitres;
+            this.serviceLitres = serviceLitres;
+            this.elapsedSeconds = elapsedSeconds;
+            this.operatorId = operatorId;
+            this.requestId = requestId;
+            this.pendingRequestId = pendingRequestId;
+        }
     }
 
     private static final class Riego {

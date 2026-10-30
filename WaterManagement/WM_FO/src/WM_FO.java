@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Scanner;
+import javax.swing.SwingUtilities;
 
 /**
  * Aplicación de operario de campo (WM_FO).
@@ -546,6 +547,24 @@ public final class WM_FO implements AutoCloseable {
         if (ipBroker.isEmpty() || puertoBroker < 1 || puertoBroker > 65535 || idOperador <= 0) {
             System.err.println("Argumentos inválidos. La IP no puede estar vacía, el puerto debe estar entre 1 y 65535 y el ID debe ser positivo.");
             return;
+        }
+
+        final String brokerHost = ipBroker;
+        final int brokerPort = puertoBroker;
+        final int operator = idOperador;
+        if (UiSupport.guiEnabled()) {
+            final boolean[] shown = {false};
+            try {
+                SwingUtilities.invokeAndWait(() -> {
+                    FOFrame frame = new FOFrame(brokerHost, brokerPort, operator);
+                    frame.setVisible(true);
+                    shown[0] = true;
+                });
+            } catch (Throwable t) {
+                System.err.println("No se pudo iniciar la interfaz gráfica de WM_FO: "
+                        + t.getMessage() + ". Se usará la consola.");
+            }
+            if (shown[0]) return;
         }
 
         try (WM_FO operador = new WM_FO(ipBroker, puertoBroker, idOperador)) {

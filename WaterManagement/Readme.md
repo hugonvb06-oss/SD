@@ -32,6 +32,31 @@ Sistema de gestión de riego inteligente distribuido en tres procesos independie
   suministrado nunca disminuye.
 - Recuperación ante caídas: monitor, motor, CENTRAL, broker y operador.
 
+## Interfaz gráfica (Swing)
+
+Cada módulo incluye una ventana Swing que se abre automáticamente cuando hay un
+escritorio disponible. No requiere dependencias adicionales (Swing forma parte del JDK)
+ni un IDE: basta con lanzar el módulo desde la línea de comandos.
+
+- **WM_Central**: panel de estaciones en tarjetas con los colores exigidos. Muestra
+  **Available** (verde), **Watering** (verde intermitente con caudal, litros del servicio,
+  tiempo y operario), **Leak** (rojo), **Out of Service** (naranja y texto literal) y
+  **Disconnected** (gris). Incluye formularios para registrar operarios, iniciar riegos y
+  enviar órdenes de bloqueo, activación y parada. El panel se refresca cada segundo.
+- **WM_FO**: pestañas de riego manual, servicios desde fichero y WS disponibles, con
+  registro de eventos de CENTRAL y avisos de estado de Kafka y del latido de la central.
+  Los servicios de fichero se envían en orden con la pausa de 4 segundos.
+- **WM_WS_M (monitor)**: tarjeta con el estado real de la estación, indicadores de enlace
+  con CENTRAL y con el motor, y botones para riego local, bloqueo, activación y parada.
+- **WM_WS_E (motor)**: tarjeta con el estado del motor, volumen acumulado, litros del
+  servicio, informe pendiente y botones para simular una avería KO o un motor sin
+  respuesta.
+
+La interfaz y la consola comparten la misma lógica: los botones equivalen a las opciones
+del menú. Si no hay escritorio (Docker, servidores, sesiones sin pantalla) o si se define
+`WM_GUI=false`, el módulo arranca en modo consola/headless con el panel y el menú de
+siempre. Los Dockerfiles y `docker-compose.yml` ya fijan `WM_GUI=false`.
+
 ## Protocolo
 
 - Control: `ENQ` → `ACK`/`NACK` → respuesta.
@@ -62,6 +87,11 @@ java WM_WS_E <ipMonitor> <puertoMonitor> [dirEstado]
 Variables de entorno: `WM_MONITOR_PORT` (6000), `WM_CENTRAL_HOST` (localhost), `WM_CENTRAL_PORT`
 (5000), `WM_WS_ID` (1), `WM_WS_LOCATION`, `WM_WS_FLOW`, `WM_STATUS_INTERVAL_MS`,
 `WM_MONITOR_HOST`, `WM_WS_STATE_DIR`.
+
+### Interfaz
+
+Variable común a WM_Central, WM_FO, WM_WS_M y WM_WS_E: `WM_GUI` (`false`/`0`/`no`/`off`
+fuerza el modo consola; cualquier otro valor deja que se use la ventana si hay escritorio).
 
 ### WM_FO
 
@@ -96,6 +126,24 @@ java -cp "WM_Central/out:lib/*" ServidorCentral 5000 localhost 9092
 java -cp "WM_WS/bin" WM_WS_E localhost 16000 ./state
 java -cp "WM_WS/bin" WM_WS_M 16000 localhost 5000 1 "Jardin principal" 12.0
 java -cp "WM_FO/out:lib/*" WM_FO localhost 9092 1
+```
+
+En Windows se incluyen los mismos comandos como scripts:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 central 5000 localhost 9092
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 ws-eng localhost 16000 state
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 ws-mon 16000 localhost 5000 1 "Jardin principal" 12.0
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 fo localhost 9092 1
+```
+
+Con escritorio se abre la ventana de cada módulo. Para forzar el modo consola (por
+ejemplo, al lanzar los procesos en segundo plano) basta con definir `WM_GUI=false`:
+
+```powershell
+$env:WM_GUI='false'
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 central 5000 localhost 9092
 ```
 
 ### 3. Despliegue con Docker
