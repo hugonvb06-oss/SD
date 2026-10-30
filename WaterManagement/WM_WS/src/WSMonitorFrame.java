@@ -33,31 +33,31 @@ import java.util.Locale;
  */
 final class WSMonitorFrame extends JFrame {
 
-    private static final Color AVAILABLE = new Color(0x2E7D32);
-    private static final Color WATERING_A = new Color(0x1B5E20);
-    private static final Color WATERING_B = new Color(0x4CAF50);
-    private static final Color LEAK = new Color(0xC62828);
-    private static final Color OUT_OF_SERVICE = new Color(0xEF6C00);
-    private static final Color DISCONNECTED = new Color(0x616161);
+    private static final Color VERDE = new Color(0x2E7D32);
+    private static final Color RIEGO_A = new Color(0x1B5E20);
+    private static final Color RIEGO_B = new Color(0x4CAF50);
+    private static final Color ROJO = new Color(0xC62828);
+    private static final Color NARANJA = new Color(0xEF6C00);
+    private static final Color GRIS = new Color(0x616161);
 
-    private static final Color BACKGROUND = new Color(0x1E1E1E);
-    private static final Color PANEL_BACKGROUND = new Color(0x252526);
-    private static final Color TEXT = new Color(0xF2F2F2);
-    private static final Color MUTED = new Color(0xBBBBBB);
+    private static final Color FONDO = new Color(0x1E1E1E);
+    private static final Color FONDO_PANEL = new Color(0x252526);
+    private static final Color TEXTO = new Color(0xF2F2F2);
+    private static final Color ATENUADO = new Color(0xBBBBBB);
 
     private final WM_WS_M monitor;
 
-    private final JLabel stateLabel = new JLabel("Disconnected");
-    private final JLabel locationLabel = new JLabel(" ");
-    private final JLabel volumeLabel = new JLabel("Volumen acumulado: 0.00 L");
-    private final JLabel detailLabel = new JLabel(" ");
-    private final JLabel centralLabel = new JLabel("CENTRAL: sin conexión");
-    private final JLabel engineLabel = new JLabel("MOTOR: desconectado");
-    private final JLabel statusLabel = new JLabel("Listo.");
-    private final JPanel card = new JPanel(new BorderLayout(0, 8));
+    private final JLabel etiquetaEstado = new JLabel("Disconnected");
+    private final JLabel etiquetaUbicacion = new JLabel(" ");
+    private final JLabel etiquetaVolumen = new JLabel("Volumen acumulado: 0.00 L");
+    private final JLabel etiquetaDetalle = new JLabel(" ");
+    private final JLabel etiquetaCentral = new JLabel("CENTRAL: sin conexión");
+    private final JLabel etiquetaMotor = new JLabel("MOTOR: desconectado");
+    private final JLabel etiquetaMensaje = new JLabel("Listo.");
+    private final JPanel tarjeta = new JPanel(new BorderLayout(0, 8));
 
-    private String state = "DESCONECTADA";
-    private boolean blinkOn;
+    private String estado = "DESCONECTADA";
+    private boolean parpadeo;
 
     WSMonitorFrame(WM_WS_M monitor) {
         super("WM_WS_M - Monitor de estación");
@@ -72,214 +72,214 @@ final class WSMonitorFrame extends JFrame {
             }
         });
 
-        getContentPane().setBackground(BACKGROUND);
+        getContentPane().setBackground(FONDO);
         setLayout(new BorderLayout(0, 10));
-        add(header(), BorderLayout.NORTH);
-        add(cardPanel(), BorderLayout.CENTER);
-        add(controls(), BorderLayout.SOUTH);
+        add(cabecera(), BorderLayout.NORTH);
+        add(panelTarjeta(), BorderLayout.CENTER);
+        add(controles(), BorderLayout.SOUTH);
 
-        Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
-        setSize(Math.min(720, Math.max(560, screen.width - 80)),
-                Math.min(520, Math.max(400, screen.height - 80)));
+        Rectangle pantalla = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        setSize(Math.min(720, Math.max(560, pantalla.width - 80)),
+                Math.min(520, Math.max(400, pantalla.height - 80)));
         setMinimumSize(new Dimension(520, 380));
         setLocationRelativeTo(null);
 
-        refresh();
-        new Timer(1000, e -> refresh()).start();
+        refrescar();
+        new Timer(1000, e -> refrescar()).start();
         new Timer(500, e -> {
-            blinkOn = !blinkOn;
-            paintState();
+            parpadeo = !parpadeo;
+            pintarEstado();
         }).start();
     }
 
-    private JComponent header() {
+    private JComponent cabecera() {
         JPanel panel = new JPanel(new BorderLayout(16, 0));
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(12, 18, 12, 18));
 
-        JLabel title = new JLabel("WM_WS_M - Monitor de estación");
-        title.setFont(new Font("SansSerif", Font.BOLD, 22));
-        title.setForeground(TEXT);
+        JLabel titulo = new JLabel("WM_WS_M - Monitor de estación");
+        titulo.setFont(new Font("SansSerif", Font.BOLD, 22));
+        titulo.setForeground(TEXTO);
 
-        locationLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        locationLabel.setForeground(MUTED);
+        etiquetaUbicacion.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        etiquetaUbicacion.setForeground(ATENUADO);
 
-        JPanel left = new JPanel();
-        left.setOpaque(false);
-        left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
-        left.add(title);
-        left.add(Box.createVerticalStrut(3));
-        left.add(locationLabel);
+        JPanel izquierda = new JPanel();
+        izquierda.setOpaque(false);
+        izquierda.setLayout(new BoxLayout(izquierda, BoxLayout.Y_AXIS));
+        izquierda.add(titulo);
+        izquierda.add(Box.createVerticalStrut(3));
+        izquierda.add(etiquetaUbicacion);
 
-        panel.add(left, BorderLayout.WEST);
+        panel.add(izquierda, BorderLayout.WEST);
         return panel;
     }
 
-    private JComponent cardPanel() {
-        card.setOpaque(true);
-        card.setBorder(BorderFactory.createCompoundBorder(
+    private JComponent panelTarjeta() {
+        tarjeta.setOpaque(true);
+        tarjeta.setBorder(BorderFactory.createCompoundBorder(
                 BorderFactory.createLineBorder(new Color(0, 0, 0, 90), 1, true),
                 new EmptyBorder(22, 24, 22, 24)));
 
-        stateLabel.setFont(new Font("SansSerif", Font.BOLD, 34));
-        stateLabel.setForeground(Color.WHITE);
-        volumeLabel.setFont(new Font("SansSerif", Font.BOLD, 15));
-        volumeLabel.setForeground(Color.WHITE);
-        detailLabel.setFont(new Font("SansSerif", Font.PLAIN, 13));
-        detailLabel.setForeground(Color.WHITE);
+        etiquetaEstado.setFont(new Font("SansSerif", Font.BOLD, 34));
+        etiquetaEstado.setForeground(Color.WHITE);
+        etiquetaVolumen.setFont(new Font("SansSerif", Font.BOLD, 15));
+        etiquetaVolumen.setForeground(Color.WHITE);
+        etiquetaDetalle.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        etiquetaDetalle.setForeground(Color.WHITE);
 
-        centralLabel.setFont(new Font("SansSerif", Font.BOLD, 13));
-        centralLabel.setForeground(Color.WHITE);
-        engineLabel.setFont(new Font("SansSerif", Font.BOLD, 13));
-        engineLabel.setForeground(Color.WHITE);
+        etiquetaCentral.setFont(new Font("SansSerif", Font.BOLD, 13));
+        etiquetaCentral.setForeground(Color.WHITE);
+        etiquetaMotor.setFont(new Font("SansSerif", Font.BOLD, 13));
+        etiquetaMotor.setForeground(Color.WHITE);
 
-        JPanel centre = new JPanel(new GridLayout(0, 1, 0, 4));
-        centre.setOpaque(false);
-        centre.add(stateLabel);
-        centre.add(volumeLabel);
-        centre.add(detailLabel);
+        JPanel centro = new JPanel(new GridLayout(0, 1, 0, 4));
+        centro.setOpaque(false);
+        centro.add(etiquetaEstado);
+        centro.add(etiquetaVolumen);
+        centro.add(etiquetaDetalle);
 
-        JPanel links = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        links.setOpaque(false);
-        links.add(centralLabel);
-        links.add(Box.createHorizontalStrut(18));
-        links.add(engineLabel);
+        JPanel enlaces = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        enlaces.setOpaque(false);
+        enlaces.add(etiquetaCentral);
+        enlaces.add(Box.createHorizontalStrut(18));
+        enlaces.add(etiquetaMotor);
 
-        card.add(centre, BorderLayout.CENTER);
-        card.add(links, BorderLayout.SOUTH);
+        tarjeta.add(centro, BorderLayout.CENTER);
+        tarjeta.add(enlaces, BorderLayout.SOUTH);
 
-        JPanel wrapper = new JPanel(new BorderLayout());
-        wrapper.setBackground(BACKGROUND);
-        wrapper.setBorder(new EmptyBorder(14, 18, 0, 18));
-        wrapper.add(card, BorderLayout.CENTER);
-        return wrapper;
+        JPanel envoltorio = new JPanel(new BorderLayout());
+        envoltorio.setBackground(FONDO);
+        envoltorio.setBorder(new EmptyBorder(14, 18, 0, 18));
+        envoltorio.add(tarjeta, BorderLayout.CENTER);
+        return envoltorio;
     }
 
-    private JComponent controls() {
+    private JComponent controles() {
         JPanel panel = new JPanel(new BorderLayout(0, 6));
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(10, 18, 12, 18));
 
-        JButton irrigate = new JButton("Iniciar riego local");
-        irrigate.addActionListener(e -> startLocalIrrigation());
-        JButton block = new JButton("Bloquear WS");
-        block.addActionListener(e -> sendCommand("BLOCK_WS", "bloqueo"));
-        JButton activate = new JButton("Activar WS");
-        activate.addActionListener(e -> sendCommand("ACTIVATE_WS", "activación"));
-        JButton stop = new JButton("Parar riego");
-        stop.addActionListener(e -> sendCommand("STOP_IRRIGATION", "parada"));
+        JButton regar = new JButton("Iniciar riego local");
+        regar.addActionListener(e -> iniciarRiegoLocal());
+        JButton bloquear = new JButton("Bloquear WS");
+        bloquear.addActionListener(e -> enviarComando("BLOCK_WS", "bloqueo"));
+        JButton activar = new JButton("Activar WS");
+        activar.addActionListener(e -> enviarComando("ACTIVATE_WS", "activación"));
+        JButton parar = new JButton("Parar riego");
+        parar.addActionListener(e -> enviarComando("STOP_IRRIGATION", "parada"));
 
-        JPanel buttons = new JPanel(new GridLayout(1, 4, 8, 0));
-        buttons.setOpaque(false);
-        buttons.add(irrigate);
-        buttons.add(block);
-        buttons.add(activate);
-        buttons.add(stop);
+        JPanel botones = new JPanel(new GridLayout(1, 4, 8, 0));
+        botones.setOpaque(false);
+        botones.add(regar);
+        botones.add(bloquear);
+        botones.add(activar);
+        botones.add(parar);
 
-        statusLabel.setForeground(MUTED);
-        statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        etiquetaMensaje.setForeground(ATENUADO);
+        etiquetaMensaje.setFont(new Font("SansSerif", Font.PLAIN, 12));
 
-        panel.add(buttons, BorderLayout.NORTH);
-        panel.add(statusLabel, BorderLayout.SOUTH);
+        panel.add(botones, BorderLayout.NORTH);
+        panel.add(etiquetaMensaje, BorderLayout.SOUTH);
         return panel;
     }
 
-    private void refresh() {
+    private void refrescar() {
         if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(this::refresh);
+            SwingUtilities.invokeLater(this::refrescar);
             return;
         }
 
-        WM_WS_M.MonitorView view = monitor.vistaMonitor();
-        state = effectiveState(view);
+        WM_WS_M.VistaMonitor vista = monitor.vistaMonitor();
+        estado = estadoEfectivo(vista);
 
-        locationLabel.setText("WS " + view.wsId + "  ·  " + view.location
-                + "  ·  Caudal nominal " + fmt(view.nominalFlow) + " L/min");
-        stateLabel.setText(displayState(state));
-        volumeLabel.setText(String.format(Locale.ROOT, "Volumen acumulado: %.2f L", view.volumeLitres));
-        centralLabel.setText(view.centralOnline ? "CENTRAL: conectada" : "CENTRAL: sin conexión");
-        centralLabel.setForeground(view.centralOnline ? new Color(0x81C784) : new Color(0xE57373));
-        engineLabel.setText("MOTOR: " + (!view.engineConnected ? "desconectado"
-                : view.engineNoResponse ? "sin respuesta" : "OK"));
-        engineLabel.setForeground(view.engineConnected && !view.engineNoResponse
+        etiquetaUbicacion.setText("WS " + vista.idWs + "  ·  " + vista.ubicacion
+                + "  ·  Caudal nominal " + fmt(vista.caudalNominal) + " L/min");
+        etiquetaEstado.setText(etiquetaEstado(estado));
+        etiquetaVolumen.setText(String.format(Locale.ROOT, "Volumen acumulado: %.2f L", vista.litros));
+        etiquetaCentral.setText(vista.centralConectada ? "CENTRAL: conectada" : "CENTRAL: sin conexión");
+        etiquetaCentral.setForeground(vista.centralConectada ? new Color(0x81C784) : new Color(0xE57373));
+        etiquetaMotor.setText("MOTOR: " + (!vista.motorConectado ? "desconectado"
+                : vista.motorSinRespuesta ? "sin respuesta" : "OK"));
+        etiquetaMotor.setForeground(vista.motorConectado && !vista.motorSinRespuesta
                 ? new Color(0x81C784) : new Color(0xE57373));
 
-        if ("REGANDO".equalsIgnoreCase(view.engineState)) {
-            detailLabel.setText(String.format(Locale.ROOT,
+        if ("REGANDO".equalsIgnoreCase(vista.estadoMotor)) {
+            etiquetaDetalle.setText(String.format(Locale.ROOT,
                     "Caudal: %.2f L/min  ·  Operario: %s  ·  Tiempo: %d s",
-                    view.flowLMin, view.operatorId > 0 ? String.valueOf(view.operatorId) : "-",
-                    view.elapsedSeconds));
-        } else if ("FUERA_SERVICIO".equalsIgnoreCase(view.engineState)) {
-            detailLabel.setText("Estación bloqueada (Out of Service).");
-        } else if ("FUGA".equalsIgnoreCase(state)) {
-            detailLabel.setText("Motor averiado o sin respuesta; la central verá Leak.");
-        } else if ("DESCONECTADA".equalsIgnoreCase(state)) {
-            detailLabel.setText("Sin enlace con WM_Central; la central verá Disconnected.");
+                    vista.caudalLMin, vista.idOperario > 0 ? String.valueOf(vista.idOperario) : "-",
+                    vista.segundos));
+        } else if ("FUERA_SERVICIO".equalsIgnoreCase(vista.estadoMotor)) {
+            etiquetaDetalle.setText("Estación bloqueada (Out of Service).");
+        } else if ("FUGA".equalsIgnoreCase(estado)) {
+            etiquetaDetalle.setText("Motor averiado o sin respuesta; la central verá Leak.");
+        } else if ("DESCONECTADA".equalsIgnoreCase(estado)) {
+            etiquetaDetalle.setText("Sin enlace con WM_Central; la central verá Disconnected.");
         } else {
-            detailLabel.setText("Disponible para riego.");
+            etiquetaDetalle.setText("Disponible para riego.");
         }
-        paintState();
+        pintarEstado();
     }
 
-    private String effectiveState(WM_WS_M.MonitorView view) {
-        if (!view.centralOnline) return "DESCONECTADA";
-        if (!view.engineConnected || view.engineNoResponse
-                || "FUGA".equalsIgnoreCase(view.engineState)) return "FUGA";
-        return view.engineState == null ? "FUGA" : view.engineState.toUpperCase(Locale.ROOT);
+    private String estadoEfectivo(WM_WS_M.VistaMonitor vista) {
+        if (!vista.centralConectada) return "DESCONECTADA";
+        if (!vista.motorConectado || vista.motorSinRespuesta
+                || "FUGA".equalsIgnoreCase(vista.estadoMotor)) return "FUGA";
+        return vista.estadoMotor == null ? "FUGA" : vista.estadoMotor.toUpperCase(Locale.ROOT);
     }
 
-    private void paintState() {
-        switch (state) {
-            case "ACTIVADA": card.setBackground(AVAILABLE); break;
-            case "REGANDO": card.setBackground(blinkOn ? WATERING_B : WATERING_A); break;
-            case "FUGA": card.setBackground(LEAK); break;
-            case "FUERA_SERVICIO": card.setBackground(OUT_OF_SERVICE); break;
-            default: card.setBackground(DISCONNECTED); break;
+    private void pintarEstado() {
+        switch (estado) {
+            case "ACTIVADA": tarjeta.setBackground(VERDE); break;
+            case "REGANDO": tarjeta.setBackground(parpadeo ? RIEGO_B : RIEGO_A); break;
+            case "FUGA": tarjeta.setBackground(ROJO); break;
+            case "FUERA_SERVICIO": tarjeta.setBackground(NARANJA); break;
+            default: tarjeta.setBackground(GRIS); break;
         }
     }
 
-    private void startLocalIrrigation() {
-        String value = JOptionPane.showInputDialog(this, "Duración del riego en segundos (1-86400):",
+    private void iniciarRiegoLocal() {
+        String valor = JOptionPane.showInputDialog(this, "Duración del riego en segundos (1-86400):",
                 "Riego local", JOptionPane.QUESTION_MESSAGE);
-        if (value == null) return;
-        int duration;
+        if (valor == null) return;
+        int duracion;
         try {
-            duration = Integer.parseInt(value.trim());
+            duracion = Integer.parseInt(valor.trim());
         } catch (NumberFormatException e) {
             JOptionPane.showMessageDialog(this, "Duración no válida.", "WM_WS_M", JOptionPane.WARNING_MESSAGE);
             return;
         }
-        String error = monitor.solicitarRiegoLocal(duration);
+        String error = monitor.solicitarRiegoLocal(duracion);
         if (error != null) {
             JOptionPane.showMessageDialog(this, error, "WM_WS_M", JOptionPane.WARNING_MESSAGE);
         } else {
-            statusLabel.setText("Solicitud de riego local enviada al motor.");
+            etiquetaMensaje.setText("Solicitud de riego local enviada al motor.");
         }
-        refresh();
+        refrescar();
     }
 
-    private void sendCommand(String type, String description) {
-        String error = monitor.enviarComandoMonitor(type);
+    private void enviarComando(String tipo, String descripcion) {
+        String error = monitor.enviarComandoMonitor(tipo);
         if (error != null) {
             JOptionPane.showMessageDialog(this, error, "WM_WS_M", JOptionPane.WARNING_MESSAGE);
         } else {
-            statusLabel.setText("Orden de " + description + " enviada al motor.");
+            etiquetaMensaje.setText("Orden de " + descripcion + " enviada al motor.");
         }
-        refresh();
+        refrescar();
     }
 
-    private static String displayState(String state) {
-        switch (state) {
+    private static String etiquetaEstado(String estado) {
+        switch (estado) {
             case "ACTIVADA": return "Available";
             case "REGANDO": return "Watering";
             case "FUGA": return "Leak";
             case "FUERA_SERVICIO": return "Out of Service";
             case "DESCONECTADA": return "Disconnected";
-            default: return state;
+            default: return estado;
         }
     }
 
-    private static String fmt(double value) {
-        return String.format(Locale.ROOT, "%.2f", value);
+    private static String fmt(double valor) {
+        return String.format(Locale.ROOT, "%.2f", valor);
     }
 }

@@ -41,24 +41,24 @@ import javax.swing.SwingUtilities;
  */
 public final class WM_WS_M {
 
-    private static final int CENTRAL_CONNECT_TIMEOUT_MS = 5_000;
-    private static final int CENTRAL_READ_TIMEOUT_MS = 8_000;
-    private static final int ENGINE_CONNECT_TIMEOUT_MS = 3_000;
-    private static final long ENGINE_STALE_MS = 3_500L;
-    private static final long ENGINE_POLL_MS = 700L;
+    private static final int TIMEOUT_CONEXION_CENTRAL_MS = 5_000;
+    private static final int TIMEOUT_LECTURA_CENTRAL_MS = 8_000;
+    private static final int TIMEOUT_CONEXION_MOTOR_MS = 3_000;
+    private static final long MOTOR_OBSOLETO_MS = 3_500L;
+    private static final long SONDEO_MOTOR_MS = 700L;
 
     private final int puertoMotor;
     private final String ipCentral;
     private final int puertoCentral;
-    private final int wsId;
+    private final int idWs;
     private final String ubicacion;
     private final double caudalNominal;
     private final long intervaloEstadoMs;
 
-    private final EngineLink motor;
+    private final EnlaceMotor motor;
 
     private volatile boolean ejecutando = true;
-    private volatile boolean centralOnline;
+    private volatile boolean centralConectada;
     private volatile String ultimoAckCentral = "";
 
     private Socket socketCentral;
@@ -68,16 +68,16 @@ public final class WM_WS_M {
     private volatile String ultimaLineaEstado = "";
     private volatile String ultimoEstadoCentral = "";
 
-    private WM_WS_M(int puertoMotor, String ipCentral, int puertoCentral, int wsId,
+    private WM_WS_M(int puertoMotor, String ipCentral, int puertoCentral, int idWs,
                     String ubicacion, double caudalNominal, long intervaloEstadoMs) {
         this.puertoMotor = puertoMotor;
         this.ipCentral = ipCentral;
         this.puertoCentral = puertoCentral;
-        this.wsId = wsId;
+        this.idWs = idWs;
         this.ubicacion = ubicacion;
         this.caudalNominal = caudalNominal;
         this.intervaloEstadoMs = Math.max(250L, intervaloEstadoMs);
-        this.motor = new EngineLink(this, puertoMotor);
+        this.motor = new EnlaceMotor(this, puertoMotor);
     }
 
     public static void main(String[] args) {
@@ -93,7 +93,7 @@ public final class WM_WS_M {
             return;
         }
 
-        WM_WS_M monitor = new WM_WS_M(p.puertoMotor, p.ipCentral, p.puertoCentral, p.wsId,
+        WM_WS_M monitor = new WM_WS_M(p.puertoMotor, p.ipCentral, p.puertoCentral, p.idWs,
                 p.ubicacion, p.caudal, p.intervaloMs);
         Runtime.getRuntime().addShutdownHook(new Thread(monitor::detener, "wm-ws-monitor-shutdown"));
 
@@ -114,7 +114,7 @@ public final class WM_WS_M {
         System.out.println("=================================================");
         System.out.println(" WM_WS_M - MONITOR DE ESTACIÓN");
         System.out.println("=================================================");
-        System.out.println("WS ID ...........: " + wsId);
+        System.out.println("WS ID ...........: " + idWs);
         System.out.println("Ubicación .......: " + ubicacion);
         System.out.println("Caudal nominal ..: " + fmt(caudalNominal) + " L/min");
         System.out.println("Motor escuchando : puerto " + puertoMotor);
@@ -157,28 +157,28 @@ public final class WM_WS_M {
     private boolean conectarYAutenticar() {
         Socket s = new Socket();
         try {
-            s.connect(new InetSocketAddress(ipCentral, puertoCentral), CENTRAL_CONNECT_TIMEOUT_MS);
+            s.connect(new InetSocketAddress(ipCentral, puertoCentral), TIMEOUT_CONEXION_CENTRAL_MS);
             s.setKeepAlive(true);
-            s.setSoTimeout(CENTRAL_READ_TIMEOUT_MS);
+            s.setSoTimeout(TIMEOUT_LECTURA_CENTRAL_MS);
             InputStream in = new BufferedInputStream(s.getInputStream());
             OutputStream out = new BufferedOutputStream(s.getOutputStream());
 
-            WireProtocol.sendControl(out, WireProtocol.ENQ);
-            int respuesta = leerControl(in, CENTRAL_READ_TIMEOUT_MS);
+            WireProtocol.enviarControl(out, WireProtocol.ENQ);
+            int respuesta = leerControl(in, TIMEOUT_LECTURA_CENTRAL_MS);
             if (respuesta != WireProtocol.ACK) {
                 throw new IOException("WM_Central no aceptó la petición de sesión (código " + respuesta + ")");
             }
 
             String ubicacionCodificada = URLEncoder.encode(ubicacion, StandardCharsets.UTF_8.name());
-            WireProtocol.sendFrame(out, "HELLO#" + wsId + "#" + ubicacionCodificada + "#" + fmt(caudalNominal));
-            int ack = leerControl(in, CENTRAL_READ_TIMEOUT_MS);
+            WireProtocol.enviarTrama(out, "HELLO#" + idWs + "#" + ubicacionCodificada + "#" + fmt(caudalNominal));
+            int ack = leerControl(in, TIMEOUT_LECTURA_CENTRAL_MS);
             if (ack != WireProtocol.ACK) throw new IOException("WM_Central no confirmó el HELLO (código " + ack + ")");
 
-            String respuestaHello = WireProtocol.readFrame(in);
-            WireProtocol.sendControl(out, WireProtocol.ACK);
+            String respuestaHello = WireProtocol.leerTrama(in);
+            WireProtocol.enviarControl(out, WireProtocol.ACK);
             if (respuestaHello == null || !respuestaHello.startsWith("HELLO_OK#OK")) {
                 System.err.println("REGISTRO DENEGADO por WM_Central: " + respuestaHello);
-                System.err.println("La WS " + wsId + " no está autorizada. Revise WM_WS_ALLOWED_IDS en la central.");
+                System.err.println("La WS " + idWs + " no está autorizada. Revise WM_WS_ALLOWED_IDS en la central.");
                 s.close();
                 ejecutando = false;
                 return false;
@@ -187,7 +187,7 @@ public final class WM_WS_M {
             socketCentral = s;
             entradaCentral = in;
             salidaCentral = out;
-            centralOnline = true;
+            centralConectada = true;
             ultimoEstadoCentral = "";
             System.out.println("[CENTRAL] Sesión autenticada: " + respuestaHello);
             return true;
@@ -200,35 +200,35 @@ public final class WM_WS_M {
 
     private void enviarEstadoCentral() throws IOException {
         EstadoMotor estado = motor.estadoParaCentral();
-        String requestId = estado.requestId == null ? "" : estado.requestId;
+        String idSolicitud = estado.idSolicitud == null ? "" : estado.idSolicitud;
         String trama = "STATUS#" + estado.estado + "#" + fmt(estado.caudal) + "#" + fmt(estado.volumen)
-                + "#" + estado.segundos + "#" + requestId + "#" + estado.operario;
-        WireProtocol.sendFrame(salidaCentral, trama);
+                + "#" + estado.segundos + "#" + idSolicitud + "#" + estado.operario;
+        WireProtocol.enviarTrama(salidaCentral, trama);
 
-        int ack = leerControl(entradaCentral, CENTRAL_READ_TIMEOUT_MS);
+        int ack = leerControl(entradaCentral, TIMEOUT_LECTURA_CENTRAL_MS);
         if (ack != WireProtocol.ACK) {
             throw new IOException("WM_Central no confirmó la trama de estado (código " + ack + ")");
         }
-        String respuesta = WireProtocol.readFrame(entradaCentral);
-        WireProtocol.sendControl(salidaCentral, WireProtocol.ACK);
-        centralOnline = true;
+        String respuesta = WireProtocol.leerTrama(entradaCentral);
+        WireProtocol.enviarControl(salidaCentral, WireProtocol.ACK);
+        centralConectada = true;
 
         if (respuesta != null && respuesta.startsWith("ACK#STATUS#OK")) {
             // Sólo se confirma al motor el informe FINAL de un servicio. Si se confirmara
             // también mientras la estación está REGANDO, el motor borraría su informe
             // final antes de que CENTRAL llegue a observar la transición a disponible y
             // el riego se cerraría como fallido por timeout.
-            if (!requestId.isEmpty() && !"REGANDO".equals(estado.estado)) {
-                ultimoAckCentral = requestId;
+            if (!idSolicitud.isEmpty() && !"REGANDO".equals(estado.estado)) {
+                ultimoAckCentral = idSolicitud;
             }
         }
-        motor.confirmarConCentral(ultimoAckCentral, centralOnline);
+        motor.confirmarConCentral(ultimoAckCentral, centralConectada);
         procesarComandosCentral(respuesta);
     }
 
     /**
      * WM_Central adjunta las órdenes pendientes a la respuesta de cada STATUS:
-     *   ACK#STATUS#OK#CMD#TIPO|requestId|operario|duracion#CMD#TIPO...
+     *   ACK#STATUS#OK#CMD#TIPO|idSolicitud|operario|duracion#CMD#TIPO...
      * Se reenvían al motor sin bloquear el envío de estados.
      */
     private void procesarComandosCentral(String respuesta) {
@@ -246,12 +246,12 @@ public final class WM_WS_M {
     }
 
     private void desconectarCentral(String motivo) {
-        if (centralOnline || socketCentral != null) {
+        if (centralConectada || socketCentral != null) {
             System.err.println(motor.estaDisponible()
                     ? "[CENTRAL] " + motivo + ". La WS continúa su riego en curso."
                     : "[CENTRAL] " + motivo);
         }
-        centralOnline = false;
+        centralConectada = false;
         motor.confirmarConCentral("", false);
         cerrarSocketCentral();
         if (!"SIN CONEXION".equals(ultimoEstadoCentral)) {
@@ -304,7 +304,7 @@ public final class WM_WS_M {
     }
 
     private void iniciarRiegoLocal(Scanner in) {
-        if (!centralOnline) {
+        if (!centralConectada) {
             System.out.println("No se puede iniciar un riego: Imposible conectar con WM_Central.");
             return;
         }
@@ -325,8 +325,8 @@ public final class WM_WS_M {
             System.out.println("La duración debe estar entre 1 y 86400 segundos.");
             return;
         }
-        String requestId = "LOCAL-" + UUID.randomUUID();
-        motor.encolarComando("START_IRRIGATION|" + requestId + "|0|" + duracion);
+        String idSolicitud = "LOCAL-" + UUID.randomUUID();
+        motor.encolarComando("START_IRRIGATION|" + idSolicitud + "|0|" + duracion);
         System.out.println("Solicitud de riego local enviada al motor.");
     }
 
@@ -337,7 +337,7 @@ public final class WM_WS_M {
 
     /** Inicia un riego local sin usar la consola. Devuelve null si se encoló correctamente. */
     public String solicitarRiegoLocal(int duracion) {
-        if (!centralOnline) {
+        if (!centralConectada) {
             return "No se puede iniciar un riego: Imposible conectar con WM_Central.";
         }
         if (!motor.estaDisponible()) {
@@ -360,12 +360,12 @@ public final class WM_WS_M {
     }
 
     /** Fotografía del estado para la interfaz gráfica. */
-    public MonitorView vistaMonitor() {
+    public VistaMonitor vistaMonitor() {
         EstadoMotor estado = motor.estadoParaCentral();
-        return new MonitorView(wsId, ubicacion, caudalNominal, centralOnline,
+        return new VistaMonitor(idWs, ubicacion, caudalNominal, centralConectada,
                 motor.estaConectado(), motor.sinRespuesta(), estado.estado,
                 estado.caudal, estado.volumen, estado.segundos,
-                estado.requestId, estado.operario, ultimoAckCentral);
+                estado.idSolicitud, estado.operario, ultimoAckCentral);
     }
 
     // ---------------------------------------------------------------- Panel
@@ -377,7 +377,7 @@ public final class WM_WS_M {
                 : "DESCONECTADO";
         String linea = String.format(Locale.ROOT,
                 "WS %d [%s] | CENTRAL: %s | MOTOR: %s | ESTADO: %s | Caudal: %s L/min | Agua: %s L%s",
-                wsId, ubicacion, centralOnline ? "CONECTADA" : "SIN CONEXIÓN", motorTxt,
+                idWs, ubicacion, centralConectada ? "CONECTADA" : "SIN CONEXIÓN", motorTxt,
                 etiquetaEstado(e.estado), fmt(e.caudal), fmt(e.volumen),
                 e.operario > 0 ? " | Operario: " + e.operario : "");
         if (!linea.equals(ultimaLineaEstado)) {
@@ -444,38 +444,38 @@ public final class WM_WS_M {
     // ---------------------------------------------------------------- Motor
 
     /** Datos de la estación para la interfaz gráfica del monitor. */
-    public static final class MonitorView {
-        public final int wsId;
-        public final String location;
-        public final double nominalFlow;
-        public final boolean centralOnline;
-        public final boolean engineConnected;
-        public final boolean engineNoResponse;
-        public final String engineState;
-        public final double flowLMin;
-        public final double volumeLitres;
-        public final long elapsedSeconds;
-        public final String requestId;
-        public final int operatorId;
-        public final String lastCentralAck;
+    public static final class VistaMonitor {
+        public final int idWs;
+        public final String ubicacion;
+        public final double caudalNominal;
+        public final boolean centralConectada;
+        public final boolean motorConectado;
+        public final boolean motorSinRespuesta;
+        public final String estadoMotor;
+        public final double caudalLMin;
+        public final double litros;
+        public final long segundos;
+        public final String idSolicitud;
+        public final int idOperario;
+        public final String ultimoAckCentral;
 
-        MonitorView(int wsId, String location, double nominalFlow, boolean centralOnline,
-                    boolean engineConnected, boolean engineNoResponse, String engineState,
-                    double flowLMin, double volumeLitres, long elapsedSeconds,
-                    String requestId, int operatorId, String lastCentralAck) {
-            this.wsId = wsId;
-            this.location = location;
-            this.nominalFlow = nominalFlow;
-            this.centralOnline = centralOnline;
-            this.engineConnected = engineConnected;
-            this.engineNoResponse = engineNoResponse;
-            this.engineState = engineState;
-            this.flowLMin = flowLMin;
-            this.volumeLitres = volumeLitres;
-            this.elapsedSeconds = elapsedSeconds;
-            this.requestId = requestId;
-            this.operatorId = operatorId;
-            this.lastCentralAck = lastCentralAck;
+        VistaMonitor(int idWs, String ubicacion, double caudalNominal, boolean centralConectada,
+                    boolean motorConectado, boolean motorSinRespuesta, String estadoMotor,
+                    double caudalLMin, double litros, long segundos,
+                    String idSolicitud, int idOperario, String ultimoAckCentral) {
+            this.idWs = idWs;
+            this.ubicacion = ubicacion;
+            this.caudalNominal = caudalNominal;
+            this.centralConectada = centralConectada;
+            this.motorConectado = motorConectado;
+            this.motorSinRespuesta = motorSinRespuesta;
+            this.estadoMotor = estadoMotor;
+            this.caudalLMin = caudalLMin;
+            this.litros = litros;
+            this.segundos = segundos;
+            this.idSolicitud = idSolicitud;
+            this.idOperario = idOperario;
+            this.ultimoAckCentral = ultimoAckCentral;
         }
     }
 
@@ -485,7 +485,7 @@ public final class WM_WS_M {
         double caudal;
         double volumen;
         long segundos;
-        String requestId = "";
+        String idSolicitud = "";
         int operario;
     }
 
@@ -493,7 +493,7 @@ public final class WM_WS_M {
      * Enlace con WM_WS_E. Mantiene una única conexión, le hace POLL cada segundo,
      * recibe su estado y le reenvía las órdenes de WM_Central o del menú local.
      */
-    static final class EngineLink extends Thread {
+    static final class EnlaceMotor extends Thread {
         private final WM_WS_M monitor;
         private final int puerto;
         private final BlockingQueue<String> comandos = new LinkedBlockingQueue<>();
@@ -503,19 +503,19 @@ public final class WM_WS_M {
         private volatile boolean sinRespuesta;
         private volatile long ultimoMensaje;
         private volatile String ultimoAckCentral = "";
-        private volatile boolean centralOnline;
+        private volatile boolean centralConectada;
 
         private volatile String estado = "FUGA";
         private volatile double caudal;
         private volatile double volumen;
         private volatile long segundos;
-        private volatile String requestId = "";
+        private volatile String idSolicitud = "";
         private volatile int operario;
 
         private volatile Socket socketActual;
         private ServerSocket servidor;
 
-        EngineLink(WM_WS_M monitor, int puerto) {
+        EnlaceMotor(WM_WS_M monitor, int puerto) {
             super("wm-ws-engine-link");
             this.monitor = monitor;
             this.puerto = puerto;
@@ -526,33 +526,33 @@ public final class WM_WS_M {
             if (comando != null && !comando.trim().isEmpty()) comandos.offer(comando);
         }
 
-        void confirmarConCentral(String requestId, boolean online) {
-            this.ultimoAckCentral = requestId == null ? "" : requestId;
-            this.centralOnline = online;
+        void confirmarConCentral(String idSolicitud, boolean online) {
+            this.ultimoAckCentral = idSolicitud == null ? "" : idSolicitud;
+            this.centralConectada = online;
         }
 
         boolean estaConectado() { return conectado; }
-        boolean sinRespuesta() { return sinRespuesta || (conectado && System.currentTimeMillis() - ultimoMensaje > ENGINE_STALE_MS); }
+        boolean sinRespuesta() { return sinRespuesta || (conectado && System.currentTimeMillis() - ultimoMensaje > MOTOR_OBSOLETO_MS); }
         boolean estaDisponible() { return conectado && !sinRespuesta() && "ACTIVADA".equals(estado); }
 
         EstadoMotor estadoParaCentral() {
             EstadoMotor e = new EstadoMotor();
             boolean motorCaido = !conectado || sinRespuesta() || "FUGA".equals(estado) ||
-                    System.currentTimeMillis() - ultimoMensaje > ENGINE_STALE_MS;
+                    System.currentTimeMillis() - ultimoMensaje > MOTOR_OBSOLETO_MS;
             if (motorCaido) {
                 // La telemetría se conserva para poder informar del volumen ya regado.
                 e.estado = "FUGA";
                 e.caudal = 0;
                 e.volumen = volumen;
                 e.segundos = segundos;
-                e.requestId = requestId;
+                e.idSolicitud = idSolicitud;
                 e.operario = operario;
             } else {
                 e.estado = estado;
                 e.caudal = caudal;
                 e.volumen = volumen;
                 e.segundos = segundos;
-                e.requestId = requestId;
+                e.idSolicitud = idSolicitud;
                 e.operario = operario;
             }
             return e;
@@ -589,12 +589,12 @@ public final class WM_WS_M {
             socketActual = s;
             try {
                 s.setKeepAlive(true);
-                s.setSoTimeout((int) Math.max(ENGINE_STALE_MS, ENGINE_POLL_MS + 1_500));
+                s.setSoTimeout((int) Math.max(MOTOR_OBSOLETO_MS, SONDEO_MOTOR_MS + 1_500));
                 InputStream in = new BufferedInputStream(s.getInputStream());
                 OutputStream out = new BufferedOutputStream(s.getOutputStream());
 
                 String ubicacion = URLEncoder.encode(monitor.ubicacion, StandardCharsets.UTF_8.name());
-                WireProtocol.sendFrame(out, "ID#" + monitor.wsId + "#" + ubicacion + "#" + fmt(monitor.caudalNominal));
+                WireProtocol.enviarTrama(out, "ID#" + monitor.idWs + "#" + ubicacion + "#" + fmt(monitor.caudalNominal));
                 int ack = in.read();
                 if (ack != WireProtocol.ACK) throw new IOException("El motor no confirmó la identificación (código " + ack + ")");
                 System.out.println("[MOTOR] WM_WS_E identificado correctamente.");
@@ -605,9 +605,9 @@ public final class WM_WS_M {
 
                 while (activo && !s.isClosed()) {
                     // 1) Órdenes pendientes (central o menú local).
-                    String comando = comandos.poll(ENGINE_POLL_MS, TimeUnit.MILLISECONDS);
+                    String comando = comandos.poll(SONDEO_MOTOR_MS, TimeUnit.MILLISECONDS);
                     if (comando != null) {
-                        WireProtocol.sendFrame(out, "CMD#" + comando);
+                        WireProtocol.enviarTrama(out, "CMD#" + comando);
                         int c = in.read();
                         if (c == WireProtocol.NACK) {
                             comandos.offer(comando);
@@ -619,14 +619,14 @@ public final class WM_WS_M {
                     // 2) Comprobación de salud + estado. POLL/STATUS es una
                     // petición-respuesta: el LRC protege la trama y no se envía ACK
                     // adicional (evita desincronizar el flujo de bytes).
-                    WireProtocol.sendFrame(out, "POLL#" + (centralOnline ? "1" : "0") + "#" + nz(ultimoAckCentral));
+                    WireProtocol.enviarTrama(out, "POLL#" + (centralConectada ? "1" : "0") + "#" + nz(ultimoAckCentral));
 
                     try {
-                        String respuesta = WireProtocol.readFrame(in);
+                        String respuesta = WireProtocol.leerTrama(in);
                         if ("KO".equals(respuesta)) {
                             marcarCaida();
                         } else {
-                            procesarStatus(respuesta);
+                            procesarEstado(respuesta);
                         }
                     } catch (SocketTimeoutException timeout) {
                         // El motor no ha respondido al POLL: se mantiene el enlace, pero
@@ -646,7 +646,7 @@ public final class WM_WS_M {
             }
         }
 
-        private void procesarStatus(String respuesta) {
+        private void procesarEstado(String respuesta) {
             if (respuesta == null || !respuesta.startsWith("STATUS#")) return;
             String[] p = respuesta.split("#", -1);
             if (p.length < 7) return;
@@ -659,7 +659,7 @@ public final class WM_WS_M {
             caudal = numero(p[2], caudal);
             volumen = numero(p[3], volumen);
             segundos = (long) numero(p[4], segundos);
-            requestId = p[5] == null ? "" : p[5];
+            idSolicitud = p[5] == null ? "" : p[5];
             operario = (int) numero(p[6], operario);
             sinRespuesta = false;
             ultimoMensaje = System.currentTimeMillis();
@@ -703,7 +703,7 @@ public final class WM_WS_M {
         int puertoMotor;
         String ipCentral;
         int puertoCentral;
-        int wsId;
+        int idWs;
         String ubicacion;
         double caudal;
         long intervaloMs = 1_000L;
@@ -714,7 +714,7 @@ public final class WM_WS_M {
                 p.puertoMotor = entero(args[0], "puerto del motor");
                 p.ipCentral = args[1].trim();
                 p.puertoCentral = entero(args[2], "puerto de WM_Central");
-                p.wsId = entero(args[3], "ID de la WS");
+                p.idWs = entero(args[3], "ID de la WS");
                 p.ubicacion = args[4].trim();
                 p.caudal = decimal(args[5], "caudal");
                 if (args.length >= 7) p.intervaloMs = entero(args[6], "intervalo de estado");
@@ -722,7 +722,7 @@ public final class WM_WS_M {
                 p.puertoMotor = entero(env("WM_MONITOR_PORT", "6000"), "WM_MONITOR_PORT");
                 p.ipCentral = env("WM_CENTRAL_HOST", "localhost").trim();
                 p.puertoCentral = entero(env("WM_CENTRAL_PORT", "5000"), "WM_CENTRAL_PORT");
-                p.wsId = entero(env("WM_WS_ID", "1"), "WM_WS_ID");
+                p.idWs = entero(env("WM_WS_ID", "1"), "WM_WS_ID");
                 p.ubicacion = env("WM_WS_LOCATION", "Jardín principal").trim();
                 p.caudal = decimal(env("WM_WS_FLOW", "10.0"), "WM_WS_FLOW");
                 p.intervaloMs = entero(env("WM_STATUS_INTERVAL_MS", "1000"), "WM_STATUS_INTERVAL_MS");
@@ -731,7 +731,7 @@ public final class WM_WS_M {
                 throw new IllegalArgumentException("Los puertos deben estar entre 1 y 65535.");
             }
             if (p.ipCentral.isEmpty()) throw new IllegalArgumentException("La IP de WM_Central no puede estar vacía.");
-            if (p.wsId <= 0) throw new IllegalArgumentException("El ID de la WS debe ser positivo.");
+            if (p.idWs <= 0) throw new IllegalArgumentException("El ID de la WS debe ser positivo.");
             if (p.ubicacion.isEmpty()) throw new IllegalArgumentException("La ubicación no puede estar vacía.");
             if (!Double.isFinite(p.caudal) || p.caudal <= 0) throw new IllegalArgumentException("El caudal debe ser mayor que cero.");
             if (p.intervaloMs < 250) throw new IllegalArgumentException("El intervalo de estado debe ser >= 250 ms.");

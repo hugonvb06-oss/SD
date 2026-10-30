@@ -44,47 +44,47 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Lógica de CENTRAL: sockets de monitorización, coordinación de riegos y Kafka. */
 public final class CentralService implements AutoCloseable {
-    public static final String TOPIC_SOLICITUDES = "wm.riego.solicitudes";
-    public static final String TOPIC_RESPUESTAS = "wm.riego.respuestas";
-    public static final String TOPIC_LATIDO = "wm.central.latido";
+    public static final String TOPICO_SOLICITUDES = "wm.riego.solicitudes";
+    public static final String TOPICO_RESPUESTAS = "wm.riego.respuestas";
+    public static final String TOPICO_LATIDO = "wm.central.latido";
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<Map<String, Object>>() { };
-    private static final long START_ACK_TIMEOUT_MS = 15_000;
-    private static final long REQUEST_TIMEOUT_EXTRA_SECONDS = 45;
-    private static final long MAX_STATION_STATUS_AGE_MS = 3_500;
+    private static final TypeReference<Map<String, Object>> TIPO_MAPA = new TypeReference<Map<String, Object>>() { };
+    private static final long TIMEOUT_ACK_INICIO_MS = 15_000;
+    private static final long SEGUNDOS_EXTRA_TIMEOUT_SOLICITUD = 45;
+    private static final long ANTIGUEDAD_MAXIMA_ESTADO_MS = 3_500;
 
     private final BaseDatos db;
-    private final String bootstrapServers;
-    private final KafkaProducer<String, String> producer;
-    private final AtomicBoolean running = new AtomicBoolean(true);
-    private final ConcurrentMap<Integer, HiloCentral> sessions = new ConcurrentHashMap<>();
-    private final ConcurrentMap<Integer, StationSnapshot> latestStates = new ConcurrentHashMap<>();
+    private final String servidoresKafka;
+    private final KafkaProducer<String, String> productor;
+    private final AtomicBoolean ejecutando = new AtomicBoolean(true);
+    private final ConcurrentMap<Integer, HiloCentral> sesiones = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, InstantaneaEstacion> ultimosEstados = new ConcurrentHashMap<>();
     private volatile String firmaPanel = "";
-    private final ConcurrentMap<Integer, ActiveRiego> activeByWs = new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, ActiveRiego> activeByRequest = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, RiegoActivo> activosPorWs = new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, RiegoActivo> activosPorSolicitud = new ConcurrentHashMap<>();
     // Bloquea nuevos riegos mientras una orden administrativa espera confirmación de la WS.
-    private final ConcurrentMap<Integer, PendingControl> pendingControls = new ConcurrentHashMap<>();
+    private final ConcurrentMap<Integer, ControlPendiente> controlesPendientes = new ConcurrentHashMap<>();
     // Órdenes pendientes de entregar a cada WS. Viajan dentro de la respuesta al STATUS
     // del monitor, de modo que no depende de Kafka y no se pierde ninguna transacción.
-    private final ConcurrentMap<Integer, ConcurrentLinkedQueue<String>> pendingCommands = new ConcurrentHashMap<>();
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(2, r -> {
+    private final ConcurrentMap<Integer, ConcurrentLinkedQueue<String>> comandosPendientes = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService planificador = Executors.newScheduledThreadPool(2, r -> {
         Thread t = new Thread(r, "wm-central-supervision"); t.setDaemon(true); return t;
     });
     // Cola acotada para que una caída prolongada de Kafka no acumule eventos sin límite.
     // Si se llena, la notificación terminal permanece pendiente en SQLite y se reintentará.
-    private final ExecutorService outbox = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
+    private final ExecutorService buzonSalida = new ThreadPoolExecutor(2, 2, 0L, TimeUnit.MILLISECONDS,
             new ArrayBlockingQueue<>(1000), r -> {
-                Thread t = new Thread(r, "wm-central-kafka-outbox"); t.setDaemon(true); return t;
+                Thread t = new Thread(r, "wm-central-kafka-buzon"); t.setDaemon(true); return t;
             }, new ThreadPoolExecutor.AbortPolicy());
-    private final ConcurrentMap<String, Boolean> terminalEventsInFlight = new ConcurrentHashMap<>();
-    private Thread kafkaThread;
+    private final ConcurrentMap<String, Boolean> eventosTerminalesEnVuelo = new ConcurrentHashMap<>();
+    private Thread hiloKafka;
 
     public CentralService(BaseDatos db, String ipBroker, int puertoBroker) {
         this.db = db;
-        this.bootstrapServers = formatBootstrap(ipBroker, puertoBroker);
+        this.servidoresKafka = formatearBootstrap(ipBroker, puertoBroker);
         Properties p = new Properties();
-        p.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        p.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, servidoresKafka);
         p.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         p.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class.getName());
         p.put(ProducerConfig.ACKS_CONFIG, "all");
@@ -93,24 +93,24 @@ public final class CentralService implements AutoCloseable {
         p.put(ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, "30000");
         p.put(ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000");
         p.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, "10000");
-        p.put(ProducerConfig.CLIENT_ID_CONFIG, "wm-central-producer");
-        producer = new KafkaProducer<>(p);
+        p.put(ProducerConfig.CLIENT_ID_CONFIG, "wm-central-productor");
+        productor = new KafkaProducer<>(p);
     }
 
-    private static String formatBootstrap(String host, int port) {
-        String h = host.trim();
+    private static String formatearBootstrap(String anfitrion, int puerto) {
+        String h = anfitrion.trim();
         if (h.contains(":") && !h.startsWith("[")) h = "[" + h + "]";
-        return h + ":" + port;
+        return h + ":" + puerto;
     }
 
-    public void start() {
-        kafkaThread = new Thread(this::kafkaConsumeLoop, "wm-central-kafka-consumer");
-        kafkaThread.setDaemon(true);
-        kafkaThread.start();
-        scheduler.scheduleAtFixedRate(this::checkTimeoutsSafely, 1, 1, TimeUnit.SECONDS);
-        scheduler.scheduleAtFixedRate(this::retryTerminalEventsSafely, 5, 5, TimeUnit.SECONDS);
-        scheduler.scheduleAtFixedRate(this::reconcileOrphanedRequestsSafely, 20, 5, TimeUnit.SECONDS);
-        scheduler.scheduleAtFixedRate(this::publishHeartbeatSafely, 0, 2, TimeUnit.SECONDS);
+    public void iniciar() {
+        hiloKafka = new Thread(this::bucleConsumoKafka, "wm-central-kafka-consumidor");
+        hiloKafka.setDaemon(true);
+        hiloKafka.start();
+        planificador.scheduleAtFixedRate(this::comprobarTimeouts, 1, 1, TimeUnit.SECONDS);
+        planificador.scheduleAtFixedRate(this::reintentarEventosTerminales, 5, 5, TimeUnit.SECONDS);
+        planificador.scheduleAtFixedRate(this::reconciliarSolicitudesHuerfanas, 20, 5, TimeUnit.SECONDS);
+        planificador.scheduleAtFixedRate(this::publicarLatido, 0, 2, TimeUnit.SECONDS);
     }
 
     /**
@@ -119,199 +119,199 @@ public final class CentralService implements AutoCloseable {
      * WM_WS_REQUIRE_KNOWN=true solo se admiten las autorizadas.
      */
     public boolean puedeRegistrar(int id) {
-        String require = System.getenv("WM_WS_REQUIRE_KNOWN");
-        if (require != null && Boolean.parseBoolean(require.trim()) && !db.existeWS(id)) return false;
-        String allowed = System.getenv("WM_WS_ALLOWED_IDS");
-        if (allowed == null || allowed.trim().isEmpty()) return true;
-        for (String token : allowed.split("[,;\\s]+")) {
+        String obliga = System.getenv("WM_WS_REQUIRE_KNOWN");
+        if (obliga != null && Boolean.parseBoolean(obliga.trim()) && !db.existeWS(id)) return false;
+        String permitidas = System.getenv("WM_WS_ALLOWED_IDS");
+        if (permitidas == null || permitidas.trim().isEmpty()) return true;
+        for (String token : permitidas.split("[,;\\s]+")) {
             try {
                 if (Integer.parseInt(token.trim()) == id) return true;
-            } catch (NumberFormatException ignored) { }
+            } catch (NumberFormatException ignorada) { }
         }
         return false;
     }
 
     /** Extrae las órdenes pendientes de una WS para adjuntarlas a su próxima respuesta. */
-    public List<String> takeCommands(int wsId) {
-        ConcurrentLinkedQueue<String> queue = pendingCommands.get(wsId);
-        List<String> result = new ArrayList<>();
-        if (queue == null) return result;
-        String command;
-        while ((command = queue.poll()) != null) result.add(command);
-        return result;
+    public List<String> tomarComandos(int idWs) {
+        ConcurrentLinkedQueue<String> cola = comandosPendientes.get(idWs);
+        List<String> resultado = new ArrayList<>();
+        if (cola == null) return resultado;
+        String comando;
+        while ((comando = cola.poll()) != null) resultado.add(comando);
+        return resultado;
     }
 
     /** Devuelve a la cola las órdenes que no se pudieron entregar (fallo del socket). */
-    public void requeueCommands(int wsId, List<String> commands) {
-        if (commands == null || commands.isEmpty()) return;
-        ConcurrentLinkedQueue<String> queue = pendingCommands.computeIfAbsent(wsId, k -> new ConcurrentLinkedQueue<>());
-        for (String command : commands) queue.offer(command);
+    public void reencolarComandos(int idWs, List<String> comandos) {
+        if (comandos == null || comandos.isEmpty()) return;
+        ConcurrentLinkedQueue<String> cola = comandosPendientes.computeIfAbsent(idWs, k -> new ConcurrentLinkedQueue<>());
+        for (String comando : comandos) cola.offer(comando);
     }
 
     /** Descarta órdenes obsoletas al conectar/desconectar una WS. */
-    public void clearCommands(int wsId) {
-        ConcurrentLinkedQueue<String> queue = pendingCommands.get(wsId);
-        if (queue != null) queue.clear();
+    public void limpiarComandos(int idWs) {
+        ConcurrentLinkedQueue<String> cola = comandosPendientes.get(idWs);
+        if (cola != null) cola.clear();
     }
 
-    private void queueCommand(int wsId, String type, String requestId, int operatorId, int durationSeconds) {
-        String command = type + "|" + (requestId == null ? "" : requestId) + "|" + operatorId + "|" + durationSeconds;
-        pendingCommands.computeIfAbsent(wsId, k -> new ConcurrentLinkedQueue<>()).offer(command);
+    private void encolarComando(int idWs, String tipo, String idSolicitud, int idOperario, int duracionSegundos) {
+        String comando = tipo + "|" + (idSolicitud == null ? "" : idSolicitud) + "|" + idOperario + "|" + duracionSegundos;
+        comandosPendientes.computeIfAbsent(idWs, k -> new ConcurrentLinkedQueue<>()).offer(comando);
     }
 
-    public boolean registerStation(int id, String location, double flowLMin, HiloCentral session) {
-        if (id <= 0 || !Double.isFinite(flowLMin) || flowLMin < 0 || location == null || location.trim().isEmpty()) return false;
-        if (!db.registrarOActualizarWS(id, location)) return false;
-        clearCommands(id);
-        HiloCentral previous = sessions.put(id, session);
-        if (previous != null && previous != session) {
-            ActiveRiego interrupted = activeByWs.get(id);
-            if (interrupted != null) {
-                finish(interrupted, "FAILED", "La conexión del monitor se ha sustituido durante el servicio; resultado no seguro.");
-                publishWsSafetyStop(id, "STOP_IRRIGATION");
+    public boolean registrarEstacion(int id, String ubicacion, double caudalLMin, HiloCentral sesion) {
+        if (id <= 0 || !Double.isFinite(caudalLMin) || caudalLMin < 0 || ubicacion == null || ubicacion.trim().isEmpty()) return false;
+        if (!db.registrarOActualizarWS(id, ubicacion)) return false;
+        limpiarComandos(id);
+        HiloCentral anterior = sesiones.put(id, sesion);
+        if (anterior != null && anterior != sesion) {
+            RiegoActivo interrumpido = activosPorWs.get(id);
+            if (interrumpido != null) {
+                finalizarServicio(interrumpido, "FAILED", "La conexión del monitor se ha sustituido durante el servicio; resultado no seguro.");
+                publicarParadaSeguridad(id, "STOP_IRRIGATION");
             }
-            previous.closeFromReplacement();
+            anterior.cerrarDesdeReemplazo();
         }
         // No reutilizar el último estado de una conexión anterior: hay que esperar
         // la primera trama STATUS de esta sesión antes de autorizar nuevos riegos.
-        latestStates.remove(id);
+        ultimosEstados.remove(id);
         db.actualizarEstadoWS(id, "DESCONECTADA");
-        System.out.println("WS " + id + " conectada desde " + session.remoteAddress() + " (" + location + "); esperando primer estado válido.");
+        System.out.println("WS " + id + " conectada desde " + sesion.direccionRemota() + " (" + ubicacion + "); esperando primer estado válido.");
         return true;
     }
 
-    public void unregisterStation(int id, HiloCentral session) {
-        boolean removed = sessions.remove(id, session);
-        if (!removed) return; // una conexión más nueva ya sustituyó esta sesión
-        clearCommands(id);
+    public void desregistrarEstacion(int id, HiloCentral sesion) {
+        boolean eliminada = sesiones.remove(id, sesion);
+        if (!eliminada) return; // una conexión más nueva ya sustituyó esta sesión
+        limpiarComandos(id);
         db.actualizarEstadoWS(id, "DESCONECTADA");
-        StationSnapshot old = latestStates.get(id);
-        if (old != null) latestStates.put(id, old.withState("DESCONECTADA"));
+        InstantaneaEstacion anterior = ultimosEstados.get(id);
+        if (anterior != null) ultimosEstados.put(id, anterior.conEstado("DESCONECTADA"));
         System.err.println("WS " + id + " desconectada; queda marcada DESCONECTADA.");
-        ActiveRiego active = activeByWs.get(id);
-        if (active != null) {
-            finish(active, "FAILED", "La estación se ha desconectado durante el servicio.");
-            publishWsSafetyStop(id, "STOP_IRRIGATION");
+        RiegoActivo activo = activosPorWs.get(id);
+        if (activo != null) {
+            finalizarServicio(activo, "FAILED", "La estación se ha desconectado durante el servicio.");
+            publicarParadaSeguridad(id, "STOP_IRRIGATION");
         }
     }
 
-    public boolean onStationStatus(int wsId, String rawState, double flowLMin, double volumeLitres,
-                                   long elapsedSeconds, String requestId, int operatorId, HiloCentral session) {
+    public boolean alRecibirEstado(int idWs, String estadoBruto, double caudalLMin, double litros,
+                                   long segundos, String idSolicitud, int idOperario, HiloCentral sesion) {
         // Solo se aceptan estados de la sesión actualmente asociada a esta WS.
-        if (sessions.get(wsId) != session || session == null || !session.isSessionOpen()) {
-            System.err.println("Se ignora un estado recibido de una sesión WS antigua o cerrada: " + wsId);
+        if (sesiones.get(idWs) != sesion || sesion == null || !sesion.sesionAbierta()) {
+            System.err.println("Se ignora un estado recibido de una sesión WS antigua o cerrada: " + idWs);
             return false;
         }
-        String state = normalizeState(rawState);
-        if (state == null || !Double.isFinite(flowLMin) || flowLMin < 0 ||
-                !Double.isFinite(volumeLitres) || volumeLitres < 0 || elapsedSeconds < 0) {
-            System.err.println("Estado/telemetría inválidos recibidos de WS " + wsId + "; se ignoran.");
+        String estado = normalizarEstado(estadoBruto);
+        if (estado == null || !Double.isFinite(caudalLMin) || caudalLMin < 0 ||
+                !Double.isFinite(litros) || litros < 0 || segundos < 0) {
+            System.err.println("Estado/telemetría inválidos recibidos de WS " + idWs + "; se ignoran.");
             return false;
         }
-        StationSnapshot anterior = latestStates.get(wsId);
+        InstantaneaEstacion anterior = ultimosEstados.get(idWs);
         // El agua suministrada es acumulativa y nunca puede disminuir. Un monitor
         // recién reiniciado aún no conoce el volumen del motor y reporta 0: se conserva
         // el último valor válido hasta que el motor vuelva a informar.
-        double volumen = Math.max(0, volumeLitres);
-        if (anterior != null && anterior.volumeLitres > volumen) volumen = anterior.volumeLitres;
-        StationSnapshot snapshot = new StationSnapshot(wsId, state, flowLMin, volumen,
-                elapsedSeconds, emptyToNull(requestId), operatorId, System.currentTimeMillis());
-        latestStates.put(wsId, snapshot);
-        db.actualizarEstadoWS(wsId, state);
-        db.actualizarAguaWS(wsId, volumen);
-        PendingControl pending = pendingControls.get(wsId);
-        if (pending != null && pending.expectedState.equals(state)) {
-            pendingControls.remove(wsId, pending);
-            System.out.println("WS " + wsId + ": orden " + pending.commandType + " confirmada por estado " + state + ".");
+        double volumen = Math.max(0, litros);
+        if (anterior != null && anterior.litros > volumen) volumen = anterior.litros;
+        InstantaneaEstacion instantanea = new InstantaneaEstacion(idWs, estado, caudalLMin, volumen,
+                segundos, vacioANulo(idSolicitud), idOperario, System.currentTimeMillis());
+        ultimosEstados.put(idWs, instantanea);
+        db.actualizarEstadoWS(idWs, estado);
+        db.actualizarAguaWS(idWs, volumen);
+        ControlPendiente pendiente = controlesPendientes.get(idWs);
+        if (pendiente != null && pendiente.estadoEsperado.equals(estado)) {
+            controlesPendientes.remove(idWs, pendiente);
+            System.out.println("WS " + idWs + ": orden " + pendiente.tipoComando + " confirmada por estado " + estado + ".");
         }
         System.out.printf(Locale.ROOT,
                 "[WS %d] Estado=%s | Caudal=%.2f L/min | Volumen=%.2f L | Tiempo=%d s%n",
-                wsId, state, flowLMin, volumen, elapsedSeconds);
+                idWs, estado, caudalLMin, volumen, segundos);
 
-        ActiveRiego active = activeByWs.get(wsId);
+        RiegoActivo activo = activosPorWs.get(idWs);
         // Recuperación tras reiniciar CENTRAL: si la estación informa el requestId persistido,
         // reconstruimos el seguimiento, pero nunca reenviamos a ciegas el comando de inicio.
-        if (active == null && snapshot.requestId != null) {
-            active = recoverActive(snapshot);
+        if (activo == null && instantanea.idSolicitud != null) {
+            activo = recuperarActivo(instantanea);
         }
-        if (active != null) {
-            synchronized (active) {
-                boolean mismoRequest = snapshot.requestId != null
-                        && active.requestId.equals(snapshot.requestId) && active.operatorId == operatorId;
+        if (activo != null) {
+            synchronized (activo) {
+                boolean mismoSolicitud = instantanea.idSolicitud != null
+                        && activo.idSolicitud.equals(instantanea.idSolicitud) && activo.idOperario == idOperario;
                 // Red de seguridad: si el motor ya no informa del requestId (porque lo
                 // confirmó antes de que CENTRAL lo viera) pero el servicio había
                 // comenzado y la estación vuelve a estar disponible, ha terminado.
-                boolean finSinRequest = snapshot.requestId == null && active.started;
-                if (!active.terminal.get() && (mismoRequest || finSinRequest)) {
+                boolean finSinSolicitud = instantanea.idSolicitud == null && activo.iniciado;
+                if (!activo.terminal.get() && (mismoSolicitud || finSinSolicitud)) {
                     // La telemetría se actualiza siempre, también cuando se informa de una
                     // fuga, para no perder el agua que ya se ha suministrado.
-                    active.lastFlow = flowLMin;
-                    active.lastVolume = volumen;
-                    active.lastElapsed = elapsedSeconds;
-                    if ("REGANDO".equals(state)) {
-                        if (!active.started) {
-                            active.started = true;
-                            active.startedAtMillis = System.currentTimeMillis() - elapsedSeconds * 1000L;
-                            db.actualizarEstadoSolicitud(active.requestId, "STARTED", null);
-                            publishEvent(active, "STARTED", "La WS ha confirmado que el riego está en curso.", false);
+                    activo.ultimoCaudal = caudalLMin;
+                    activo.ultimoVolumen = volumen;
+                    activo.ultimoTiempo = segundos;
+                    if ("REGANDO".equals(estado)) {
+                        if (!activo.iniciado) {
+                            activo.iniciado = true;
+                            activo.iniciadoEnMillis = System.currentTimeMillis() - segundos * 1000L;
+                            db.actualizarEstadoSolicitud(activo.idSolicitud, "STARTED", null);
+                            publicarEvento(activo, "STARTED", "La WS ha confirmado que el riego está en curso.", false);
                         }
-                        publishEvent(active, "PROGRESS", "Riego en curso.", false);
-                    } else if (active.started && "ACTIVADA".equals(state)) {
-                        finish(active, "COMPLETED", "Riego finalizado.");
-                    } else if (!active.started && "ACTIVADA".equals(state) && elapsedSeconds > 0) {
+                        publicarEvento(activo, "PROGRESS", "Riego en curso.", false);
+                    } else if (activo.iniciado && "ACTIVADA".equals(estado)) {
+                        finalizarServicio(activo, "COMPLETED", "Riego finalizado.");
+                    } else if (!activo.iniciado && "ACTIVADA".equals(estado) && segundos > 0) {
                         // La estación puede completar un riego corto entre dos informes y no llegar
                         // a publicar un estado REGANDO. Exigimos duración observada > 0 para no
                         // confundir un ACK de inicio sin ejecutar con una finalización correcta.
-                        finish(active, "COMPLETED", "Riego finalizado; la transición intermedia no se observó.");
+                        finalizarServicio(activo, "COMPLETED", "Riego finalizado; la transición intermedia no se observó.");
                     }
                 }
             }
         }
 
-        if ("FUGA".equals(state)) {
-            ActiveRiego running = activeByWs.get(wsId);
-            if (running != null) {
-                finish(running, "FAILED", "La estación ha notificado una avería/fuga; el riego finaliza de inmediato.");
+        if ("FUGA".equals(estado)) {
+            RiegoActivo enCurso = activosPorWs.get(idWs);
+            if (enCurso != null) {
+                finalizarServicio(enCurso, "FAILED", "La estación ha notificado una avería/fuga; el riego finaliza de inmediato.");
             }
-        } else if ("DESCONECTADA".equals(state)) {
-            ActiveRiego running = activeByWs.get(wsId);
-            if (running != null) {
-                finish(running, "FAILED", "La estación se ha desconectado durante el servicio.");
+        } else if ("DESCONECTADA".equals(estado)) {
+            RiegoActivo enCurso = activosPorWs.get(idWs);
+            if (enCurso != null) {
+                finalizarServicio(enCurso, "FAILED", "La estación se ha desconectado durante el servicio.");
             }
-        } else if ("FUERA_SERVICIO".equals(state)) {
-            ActiveRiego running = activeByWs.get(wsId);
-            if (running != null) finish(running, "CANCELLED", "La estación ha sido bloqueada.");
+        } else if ("FUERA_SERVICIO".equals(estado)) {
+            RiegoActivo enCurso = activosPorWs.get(idWs);
+            if (enCurso != null) finalizarServicio(enCurso, "CANCELLED", "La estación ha sido bloqueada.");
         }
         return true;
     }
 
-    private ActiveRiego recoverActive(StationSnapshot snapshot) {
-        Map<String, Object> row = db.obtenerSolicitud(snapshot.requestId);
-        if (row == null || isTerminal(string(row.get("status")))) return null;
-        int operatorId = number(row.get("operatorId"), snapshot.operatorId);
-        int wsId = number(row.get("wsId"), snapshot.wsId);
-        int duration = number(row.get("durationSeconds"), 0);
-        if (duration <= 0) return null;
-        ActiveRiego recovered = new ActiveRiego(snapshot.requestId, operatorId, wsId, duration);
-        recovered.started = true;
-        recovered.startedAtMillis = System.currentTimeMillis() - snapshot.elapsedSeconds * 1000L;
-        recovered.lastFlow = snapshot.flowLMin;
-        recovered.lastVolume = snapshot.volumeLitres;
-        recovered.lastElapsed = snapshot.elapsedSeconds;
+    private RiegoActivo recuperarActivo(InstantaneaEstacion instantanea) {
+        Map<String, Object> fila = db.obtenerSolicitud(instantanea.idSolicitud);
+        if (fila == null || esTerminal(texto(fila.get("status")))) return null;
+        int idOperario = entero(fila.get("operatorId"), instantanea.idOperario);
+        int idWs = entero(fila.get("wsId"), instantanea.idWs);
+        int duracion = entero(fila.get("durationSeconds"), 0);
+        if (duracion <= 0) return null;
+        RiegoActivo recuperado = new RiegoActivo(instantanea.idSolicitud, idOperario, idWs, duracion);
+        recuperado.iniciado = true;
+        recuperado.iniciadoEnMillis = System.currentTimeMillis() - instantanea.segundos * 1000L;
+        recuperado.ultimoCaudal = instantanea.caudalLMin;
+        recuperado.ultimoVolumen = instantanea.litros;
+        recuperado.ultimoTiempo = instantanea.segundos;
         // Tras una recuperación no se conoce el volumen previo al servicio; se informa
         // del acumulado disponible en lugar de inventar una cifra.
-        recovered.baseVolume = 0;
-        ActiveRiego winner = activeByWs.putIfAbsent(wsId, recovered);
-        if (winner != null) return winner;
-        activeByRequest.put(snapshot.requestId, recovered);
-        db.actualizarEstadoSolicitud(snapshot.requestId, "STARTED", null);
-        System.out.println("Seguimiento de solicitud " + snapshot.requestId + " recuperado tras reconexión.");
-        return recovered;
+        recuperado.volumenBase = 0;
+        RiegoActivo ganador = activosPorWs.putIfAbsent(idWs, recuperado);
+        if (ganador != null) return ganador;
+        activosPorSolicitud.put(instantanea.idSolicitud, recuperado);
+        db.actualizarEstadoSolicitud(instantanea.idSolicitud, "STARTED", null);
+        System.out.println("Seguimiento de solicitud " + instantanea.idSolicitud + " recuperado tras reconexión.");
+        return recuperado;
     }
 
-    private static String normalizeState(String state) {
-        if (state == null) return null;
-        String s = state.trim().toUpperCase(Locale.ROOT).replace(' ', '_').replace('-', '_');
+    private static String normalizarEstado(String estado) {
+        if (estado == null) return null;
+        String s = estado.trim().toUpperCase(Locale.ROOT).replace(' ', '_').replace('-', '_');
         switch (s) {
             case "ACTIVADA": case "ACTIVA": case "IDLE": case "AVAILABLE": case "READY": case "VERDE":
                 return "ACTIVADA";
@@ -327,12 +327,12 @@ public final class CentralService implements AutoCloseable {
         }
     }
 
-    private void kafkaConsumeLoop() {
-        while (running.get()) {
+    private void bucleConsumoKafka() {
+        while (ejecutando.get()) {
             try {
-                if (manageTopicsEnabled()) ensureTopicsExist();
+                if (gestionTopicsHabilitada()) asegurarTopics();
                 Properties p = new Properties();
-                p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+                p.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, servidoresKafka);
                 p.put(ConsumerConfig.GROUP_ID_CONFIG, "wm-central-solicitudes-v1");
                 p.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
                 p.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
@@ -341,105 +341,145 @@ public final class CentralService implements AutoCloseable {
                 p.put(ConsumerConfig.MAX_POLL_RECORDS_CONFIG, "100");
                 p.put(ConsumerConfig.SESSION_TIMEOUT_MS_CONFIG, "10000");
                 p.put(ConsumerConfig.HEARTBEAT_INTERVAL_MS_CONFIG, "3000");
-                try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(p)) {
-                    consumer.subscribe(Collections.singletonList(TOPIC_SOLICITUDES));
-                    System.out.println("CENTRAL escuchando solicitudes Kafka en " + TOPIC_SOLICITUDES);
-                    while (running.get()) {
-                        ConsumerRecords<String, String> records = consumer.poll(Duration.ofMillis(500));
-                        for (ConsumerRecord<String, String> record : records) {
-                            final Map<String, Object> request;
+                try (KafkaConsumer<String, String> consumidor = new KafkaConsumer<>(p)) {
+                    consumidor.subscribe(Collections.singletonList(TOPICO_SOLICITUDES));
+                    System.out.println("CENTRAL escuchando solicitudes Kafka en " + TOPICO_SOLICITUDES);
+                    while (ejecutando.get()) {
+                        ConsumerRecords<String, String> registros = consumidor.poll(Duration.ofMillis(500));
+                        for (ConsumerRecord<String, String> registro : registros) {
+                            final Map<String, Object> solicitud;
                             try {
-                                request = JSON.readValue(record.value(), MAP_TYPE);
-                            } catch (Exception malformed) {
+                                solicitud = JSON.readValue(registro.value(), TIPO_MAPA);
+                            } catch (Exception malFormada) {
                                 // El JSON mal formado no se recuperará reintentándolo; se descarta
                                 // para impedir que una entrada tóxica bloquee la partición.
-                                System.err.println("Mensaje Kafka mal formado (se descarta): " + malformed.getMessage());
+                                System.err.println("Mensaje Kafka mal formado (se descarta): " + malFormada.getMessage());
                                 continue;
                             }
-                            // Si handleRequest falla por un error transitorio, dejamos que la excepción
+                            // Si manejarSolicitud falla por un error transitorio, dejamos que la excepción
                             // salga del bucle: no se confirma el lote y se relee desde el último offset
                             // confirmado. requestId/SQLite evita ejecutar dos veces peticiones repetidas.
-                            handleRequest(request);
+                            manejarSolicitud(solicitud);
                         }
-                        if (!records.isEmpty()) consumer.commitSync(Duration.ofSeconds(10));
+                        if (!registros.isEmpty()) consumidor.commitSync(Duration.ofSeconds(10));
                     }
                 }
             } catch (Exception e) {
-                if (running.get()) {
+                if (ejecutando.get()) {
                     System.err.println("Kafka de CENTRAL no disponible: " + e.getMessage() + ". Se reintentará en 2 s.");
-                    sleep(2000);
+                    dormir(2000);
                 }
             }
         }
     }
 
-    private boolean manageTopicsEnabled() {
-        String configured = System.getenv("WM_CENTRAL_MANAGE_TOPICS");
-        return configured == null || Boolean.parseBoolean(configured.trim());
+    private boolean gestionTopicsHabilitada() {
+        String configurado = System.getenv("WM_CENTRAL_MANAGE_TOPICS");
+        return configurado == null || Boolean.parseBoolean(configurado.trim());
     }
 
-    private void ensureTopicsExist() throws Exception {
+    private void asegurarTopics() throws Exception {
         Properties p = new Properties();
-        p.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        p.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, servidoresKafka);
         p.put(AdminClientConfig.REQUEST_TIMEOUT_MS_CONFIG, "10000");
         p.put(AdminClientConfig.DEFAULT_API_TIMEOUT_MS_CONFIG, "15000");
         try (AdminClient admin = AdminClient.create(p)) {
-            Set<String> existing = admin.listTopics().names().get(10, TimeUnit.SECONDS);
-            List<NewTopic> missing = new ArrayList<>();
-            for (String topic : Arrays.asList(TOPIC_SOLICITUDES, TOPIC_RESPUESTAS, TOPIC_LATIDO)) {
-                if (!existing.contains(topic)) missing.add(new NewTopic(topic, 3, (short) 1));
+            Set<String> existentes = admin.listTopics().names().get(10, TimeUnit.SECONDS);
+            List<NewTopic> faltantes = new ArrayList<>();
+            for (String tema : Arrays.asList(TOPICO_SOLICITUDES, TOPICO_RESPUESTAS, TOPICO_LATIDO)) {
+                if (!existentes.contains(tema)) faltantes.add(new NewTopic(tema, 3, (short) 1));
             }
-            if (!missing.isEmpty()) {
-                try { admin.createTopics(missing).all().get(15, TimeUnit.SECONDS); }
+            if (!faltantes.isEmpty()) {
+                try { admin.createTopics(faltantes).all().get(15, TimeUnit.SECONDS); }
                 catch (ExecutionException e) {
-                    if (!(rootCause(e) instanceof TopicExistsException)) throw e;
+                    if (!(causaRaiz(e) instanceof TopicExistsException)) throw e;
                 }
             }
         }
     }
 
-    private void handleRequest(Map<String, Object> request) throws Exception {
-        String type = string(request.get("type"));
-        String requestId = string(request.get("requestId"));
-        if (requestId == null || requestId.trim().isEmpty()) {
+    private void manejarSolicitud(Map<String, Object> solicitud) throws Exception {
+        String tipo = texto(solicitud.get("type"));
+        String idSolicitud = texto(solicitud.get("requestId"));
+        if (idSolicitud == null || idSolicitud.trim().isEmpty()) {
             System.err.println("Petición Kafka ignorada: falta requestId.");
             return;
         }
 
-        int operatorId = number(request.get("operatorId"), -1);
-        if (operatorId <= 0) {
+        int idOperario = entero(solicitud.get("operatorId"), -1);
+        if (idOperario <= 0) {
             // No hay un operador válido al que devolver la respuesta. WM_FO ya valida
             // que el ID sea positivo; este caso indica un productor mal configurado.
-            System.err.println("Petición " + requestId + " ignorada: operatorId inválido.");
+            System.err.println("Petición " + idSolicitud + " ignorada: operatorId inválido.");
             return;
         }
 
-        if ("LIST_AVAILABLE_WS".equals(type)) {
-            if (!db.existeOperario(operatorId)) {
-                publishGenericEvent(requestId, operatorId, -1, "REJECTED",
+        if ("LIST_AVAILABLE_WS".equals(tipo)) {
+            if (!db.existeOperario(idOperario)) {
+                publicarEventoGenerico(idSolicitud, idOperario, -1, "REJECTED",
                         "El operario no está registrado en CENTRAL.");
                 return;
             }
-            Map<String, Object> response = new LinkedHashMap<>();
-            response.put("type", "AVAILABLE_WS_LIST");
-            response.put("requestId", requestId);
-            response.put("operatorId", operatorId);
-            response.put("stations", listarWSDisponiblesEnLinea());
-            response.put("createdAt", Instant.now().toString());
-            publishAsync(TOPIC_RESPUESTAS, Integer.toString(operatorId), response);
+            Map<String, Object> respuesta = new LinkedHashMap<>();
+            respuesta.put("type", "AVAILABLE_WS_LIST");
+            respuesta.put("requestId", idSolicitud);
+            respuesta.put("operatorId", idOperario);
+            respuesta.put("stations", listarWsDisponiblesEnLinea());
+            respuesta.put("createdAt", Instant.now().toString());
+            publicarAsincrono(TOPICO_RESPUESTAS, Integer.toString(idOperario), respuesta);
             return;
         }
 
-        if (!"RIEGO_REQUEST".equals(type)) {
-            publishGenericEvent(requestId, operatorId, number(request.get("wsId"), -1),
+        // Consulta del estado de una solicitud previa (recuperación de WM_FO tras
+        // cerrarse durante un servicio). Devuelve el evento terminal si ya existe o el
+        // estado actual en caso contrario, siempre que pertenezca al operario.
+        if ("CONSULTAR_ESTADO".equals(tipo)) {
+            if (!db.existeOperario(idOperario)) {
+                publicarEventoGenerico(idSolicitud, idOperario, -1, "REJECTED",
+                        "El operario no está registrado en CENTRAL.");
+                return;
+            }
+            Map<String, Object> fila = db.obtenerSolicitud(idSolicitud);
+            if (fila == null) {
+                publicarEventoGenerico(idSolicitud, idOperario, -1, "REJECTED",
+                        "No existe ninguna solicitud con ese requestId.");
+                return;
+            }
+            int propietario = entero(fila.get("operatorId"), -1);
+            int idWs = entero(fila.get("wsId"), -1);
+            if (propietario != idOperario) {
+                publicarEventoGenerico(idSolicitud, idOperario, idWs, "REJECTED",
+                        "La solicitud no pertenece a este operario.");
+                return;
+            }
+            String eventoTerminal = texto(fila.get("terminalEvent"));
+            if (eventoTerminal != null && !eventoTerminal.isEmpty()) {
+                publicarDirecto(TOPICO_RESPUESTAS, Integer.toString(idOperario), eventoTerminal);
+                return;
+            }
+            RiegoActivo activo = activosPorSolicitud.get(idSolicitud);
+            if (activo != null) {
+                publicarEvento(activo, "PROGRESS", "El servicio sigue en curso.", false);
+                return;
+            }
+            String estadoActual = texto(fila.get("status"));
+            Map<String, Object> evento = crearEvento(idSolicitud, idOperario, idWs,
+                    estadoActual == null ? "RECEIVED" : estadoActual,
+                    "Estado actual de la solicitud.", 0, 0, 0);
+            publicarAsincrono(TOPICO_RESPUESTAS, Integer.toString(idOperario), evento);
+            return;
+        }
+
+        if (!"RIEGO_REQUEST".equals(tipo)) {
+            publicarEventoGenerico(idSolicitud, idOperario, entero(solicitud.get("wsId"), -1),
                     "REJECTED", "Tipo de solicitud desconocido.");
             return;
         }
 
-        int wsId = number(request.get("wsId"), -1);
-        int duration = number(request.get("durationSeconds"), -1);
-        if (wsId <= 0 || duration < 1 || duration > 86400) {
-            publishGenericEvent(requestId, operatorId, wsId, "REJECTED",
+        int idWs = entero(solicitud.get("wsId"), -1);
+        int duracion = entero(solicitud.get("durationSeconds"), -1);
+        if (idWs <= 0 || duracion < 1 || duracion > 86400) {
+            publicarEventoGenerico(idSolicitud, idOperario, idWs, "REJECTED",
                     "ID de WS o duración inválidos. La duración debe estar entre 1 y 86400 segundos.");
             return;
         }
@@ -447,45 +487,45 @@ public final class CentralService implements AutoCloseable {
         // Persistimos la petición antes de validarla por completo: si el operario no
         // existe o la WS no está disponible, el rechazo también queda registrado y
         // puede notificarse después de una caída temporal de Kafka.
-        boolean nueva = db.guardarSolicitudSiNueva(requestId, operatorId, wsId, duration);
+        boolean nueva = db.guardarSolicitudSiNueva(idSolicitud, idOperario, idWs, duracion);
         if (!nueva) {
-            Map<String, Object> anterior = db.obtenerSolicitud(requestId);
+            Map<String, Object> anterior = db.obtenerSolicitud(idSolicitud);
             if (anterior == null) {
-                publishGenericEvent(requestId, operatorId, wsId, "FAILED",
+                publicarEventoGenerico(idSolicitud, idOperario, idWs, "FAILED",
                         "CENTRAL no pudo persistir la solicitud; no se ha enviado una orden de riego.");
                 return;
             }
 
-            int oldOperator = number(anterior.get("operatorId"), -1);
-            int oldWs = number(anterior.get("wsId"), -1);
-            int oldDuration = number(anterior.get("durationSeconds"), -1);
-            if (oldOperator != operatorId || oldWs != wsId || oldDuration != duration) {
-                Map<String, Object> conflict = makeEvent(requestId, operatorId, wsId, "REJECTED",
+            int operarioAntiguo = entero(anterior.get("operatorId"), -1);
+            int wsAntigua = entero(anterior.get("wsId"), -1);
+            int duracionAntigua = entero(anterior.get("durationSeconds"), -1);
+            if (operarioAntiguo != idOperario || wsAntigua != idWs || duracionAntigua != duracion) {
+                Map<String, Object> conflicto = crearEvento(idSolicitud, idOperario, idWs, "REJECTED",
                         "El requestId ya se utilizó con parámetros diferentes; no se repetirá el riego.", 0, 0, 0);
-                publishAsync(TOPIC_RESPUESTAS, Integer.toString(operatorId), conflict);
+                publicarAsincrono(TOPICO_RESPUESTAS, Integer.toString(idOperario), conflicto);
                 return;
             }
 
-            String terminal = string(anterior.get("terminalEvent"));
+            String terminal = texto(anterior.get("terminalEvent"));
             if (terminal != null && !terminal.isEmpty()) {
-                if (publishRaw(TOPIC_RESPUESTAS, Integer.toString(operatorId), terminal)) {
-                    db.marcarEventoTerminalEnviado(requestId);
+                if (publicarDirecto(TOPICO_RESPUESTAS, Integer.toString(idOperario), terminal)) {
+                    db.marcarEventoTerminalEnviado(idSolicitud);
                 }
                 return;
             }
 
-            ActiveRiego activeExisting = activeByRequest.get(requestId);
-            if (activeExisting != null) {
-                publishEvent(activeExisting, activeExisting.started ? "PROGRESS" : "RECEIVED",
+            RiegoActivo activoExistente = activosPorSolicitud.get(idSolicitud);
+            if (activoExistente != null) {
+                publicarEvento(activoExistente, activoExistente.iniciado ? "PROGRESS" : "RECEIVED",
                         "Solicitud repetida detectada; no se vuelve a activar la estación.", false);
                 return;
             }
 
-            StationSnapshot current = latestStates.get(wsId);
-            if (current != null && requestId.equals(current.requestId)) {
-                ActiveRiego recovered = recoverActive(current);
-                if (recovered != null) {
-                    publishEvent(recovered, recovered.started ? "PROGRESS" : "RECEIVED",
+            InstantaneaEstacion actual = ultimosEstados.get(idWs);
+            if (actual != null && idSolicitud.equals(actual.idSolicitud)) {
+                RiegoActivo recuperado = recuperarActivo(actual);
+                if (recuperado != null) {
+                    publicarEvento(recuperado, recuperado.iniciado ? "PROGRESS" : "RECEIVED",
                             "Seguimiento recuperado; no se reenviará la orden de inicio.", false);
                     return;
                 }
@@ -493,326 +533,326 @@ public final class CentralService implements AutoCloseable {
 
             // No se reenvía una orden si el estado no puede recuperarse; el reconciliador
             // cerrará como FAILED una solicitud abandonada después del periodo de gracia.
-            publishGenericEvent(requestId, operatorId, wsId, "RECEIVED",
+            publicarEventoGenerico(idSolicitud, idOperario, idWs, "RECEIVED",
                     "Solicitud duplicada; CENTRAL está recuperando el estado y no repetirá el riego.");
             return;
         }
 
-        if (!requestTimestampIsFresh(request.get("createdAt"))) {
-            finishRejected(requestId, operatorId, wsId,
+        if (!marcaTiempoFresca(solicitud.get("createdAt"))) {
+            rechazar(idSolicitud, idOperario, idWs,
                     "La solicitud es demasiado antigua o no contiene una fecha createdAt válida; no se iniciará un riego atrasado.");
             return;
         }
 
-        if (!db.existeOperario(operatorId)) {
-            finishRejected(requestId, operatorId, wsId,
+        if (!db.existeOperario(idOperario)) {
+            rechazar(idSolicitud, idOperario, idWs,
                     "El operario no está registrado en CENTRAL.");
             return;
         }
 
-        publishGenericEvent(requestId, operatorId, wsId, "RECEIVED", "Solicitud recibida por CENTRAL.");
-        db.actualizarEstadoSolicitud(requestId, "CHECKING", null);
-        publishGenericEvent(requestId, operatorId, wsId, "CHECKING",
+        publicarEventoGenerico(idSolicitud, idOperario, idWs, "RECEIVED", "Solicitud recibida por CENTRAL.");
+        db.actualizarEstadoSolicitud(idSolicitud, "CHECKING", null);
+        publicarEventoGenerico(idSolicitud, idOperario, idWs, "CHECKING",
                 "Comprobando operario, estación y disponibilidad.");
 
-        if (!db.existeWS(wsId)) {
-            finishRejected(requestId, operatorId, wsId, "La WS no está registrada.");
+        if (!db.existeWS(idWs)) {
+            rechazar(idSolicitud, idOperario, idWs, "La WS no está registrada.");
             return;
         }
 
-        HiloCentral session = sessions.get(wsId);
-        Map<String, Object> ws = db.obtenerWS(wsId);
-        String state = ws == null ? null : string(ws.get("state"));
-        StationSnapshot currentStatus = latestStates.get(wsId);
-        PendingControl pendingControl = pendingControls.get(wsId);
-        if (pendingControl != null) {
-            finishRejected(requestId, operatorId, wsId,
-                    "La WS tiene una orden administrativa pendiente de confirmación: " + pendingControl.commandType + ".");
+        HiloCentral sesion = sesiones.get(idWs);
+        Map<String, Object> ws = db.obtenerWS(idWs);
+        String estado = ws == null ? null : texto(ws.get("state"));
+        InstantaneaEstacion estadoActual = ultimosEstados.get(idWs);
+        ControlPendiente controlPendiente = controlesPendientes.get(idWs);
+        if (controlPendiente != null) {
+            rechazar(idSolicitud, idOperario, idWs,
+                    "La WS tiene una orden administrativa pendiente de confirmación: " + controlPendiente.tipoComando + ".");
             return;
         }
-        if (session == null || !session.isSessionOpen() || !hasFreshStatus(wsId) || currentStatus == null) {
-            finishRejected(requestId, operatorId, wsId,
+        if (sesion == null || !sesion.sesionAbierta() || !estadoReciente(idWs) || estadoActual == null) {
+            rechazar(idSolicitud, idOperario, idWs,
                     "La WS está desconectada o no responde a las comprobaciones periódicas.");
             return;
         }
-        if (!"ACTIVADA".equalsIgnoreCase(state) || !"ACTIVADA".equals(currentStatus.state)) {
-            finishRejected(requestId, operatorId, wsId,
-                    "La WS no está disponible. Estado actual: " + state);
+        if (!"ACTIVADA".equalsIgnoreCase(estado) || !"ACTIVADA".equals(estadoActual.estado)) {
+            rechazar(idSolicitud, idOperario, idWs,
+                    "La WS no está disponible. Estado actual: " + estado);
             return;
         }
 
-        ActiveRiego active = new ActiveRiego(requestId, operatorId, wsId, duration);
-        active.baseVolume = currentStatus.volumeLitres;
-        ActiveRiego previous = activeByWs.putIfAbsent(wsId, active);
-        if (previous != null) {
-            finish(active, "REJECTED", "La WS ya tiene un servicio en curso.");
+        RiegoActivo activo = new RiegoActivo(idSolicitud, idOperario, idWs, duracion);
+        activo.volumenBase = estadoActual.litros;
+        RiegoActivo previo = activosPorWs.putIfAbsent(idWs, activo);
+        if (previo != null) {
+            finalizarServicio(activo, "REJECTED", "La WS ya tiene un servicio en curso.");
             return;
         }
-        activeByRequest.put(requestId, active);
-        db.actualizarEstadoSolicitud(requestId, "AUTHORIZED", null);
-        publishEvent(active, "AUTHORIZED", "La WS está disponible; se solicita el inicio del riego.", false);
+        activosPorSolicitud.put(idSolicitud, activo);
+        db.actualizarEstadoSolicitud(idSolicitud, "AUTHORIZED", null);
+        publicarEvento(activo, "AUTHORIZED", "La WS está disponible; se solicita el inicio del riego.", false);
 
-        queueCommand(wsId, "START_IRRIGATION", requestId, operatorId, duration);
-        active.commandSent = true;
-        active.commandSentAtMillis = System.currentTimeMillis();
-        System.out.println("Orden de riego encolada para la WS " + wsId + ": requestId=" + requestId);
+        encolarComando(idWs, "START_IRRIGATION", idSolicitud, idOperario, duracion);
+        activo.comandoEnviado = true;
+        activo.comandoEnviadoEnMillis = System.currentTimeMillis();
+        System.out.println("Orden de riego encolada para la WS " + idWs + ": requestId=" + idSolicitud);
     }
 
-    private void finishRejected(String requestId, int operatorId, int wsId, String message) {
-        Map<String,Object> event = makeEvent(requestId, operatorId, wsId, "REJECTED", message, 0, 0, 0);
-        sendTerminal(event);
+    private void rechazar(String idSolicitud, int idOperario, int idWs, String mensaje) {
+        Map<String, Object> evento = crearEvento(idSolicitud, idOperario, idWs, "REJECTED", mensaje, 0, 0, 0);
+        enviarTerminal(evento);
     }
 
-    private void publishGenericEvent(String requestId, int operatorId, int wsId, String status, String message) {
+    private void publicarEventoGenerico(String idSolicitud, int idOperario, int idWs, String estado, String mensaje) {
         // Para rechazos previos a crear el registro (p. ej. argumentos inválidos o consultas
         // de listado) no se sobrescribe una posible solicitud ya persistida con el mismo ID.
-        Map<String, Object> event = makeEvent(requestId, operatorId, wsId, status, message, 0, 0, 0);
-        publishAsync(TOPIC_RESPUESTAS, Integer.toString(operatorId), event);
+        Map<String, Object> evento = crearEvento(idSolicitud, idOperario, idWs, estado, mensaje, 0, 0, 0);
+        publicarAsincrono(TOPICO_RESPUESTAS, Integer.toString(idOperario), evento);
     }
 
-    private void publishEvent(ActiveRiego active, String status, String message, boolean terminal) {
-        synchronized (active) {
+    private void publicarEvento(RiegoActivo activo, String estado, String mensaje, boolean terminal) {
+        synchronized (activo) {
             // Una telemetría tardía no debe sobrescribir el estado persistido después del terminal.
-            if (!terminal && active.terminal.get()) return;
-            Map<String,Object> event = makeEvent(active.requestId, active.operatorId, active.wsId,
-                    status, message, active.lastFlow, active.lastVolume, active.lastElapsed);
+            if (!terminal && activo.terminal.get()) return;
+            Map<String, Object> evento = crearEvento(activo.idSolicitud, activo.idOperario, activo.idWs,
+                    estado, mensaje, activo.ultimoCaudal, activo.ultimoVolumen, activo.ultimoTiempo);
             // La telemetría acumula litros desde el inicio de ESTE riego, no desde el arranque de la WS.
-            event.put("serviceVolumeLitres", Math.max(0.0, active.lastVolume - active.baseVolume));
-            if (terminal) sendTerminal(event);
+            evento.put("serviceVolumeLitres", Math.max(0.0, activo.ultimoVolumen - activo.volumenBase));
+            if (terminal) enviarTerminal(evento);
             else {
-                db.actualizarEstadoSolicitud(active.requestId, status, null);
-                publishAsync(TOPIC_RESPUESTAS, Integer.toString(active.operatorId), event);
+                db.actualizarEstadoSolicitud(activo.idSolicitud, estado, null);
+                publicarAsincrono(TOPICO_RESPUESTAS, Integer.toString(activo.idOperario), evento);
             }
         }
     }
 
-    private Map<String,Object> makeEvent(String requestId, int operatorId, int wsId, String status,
-                                        String message, double flow, double volume, long elapsed) {
-        Map<String,Object> event = new LinkedHashMap<>();
-        event.put("type", "RIEGO_EVENT"); event.put("requestId", requestId);
-        event.put("operatorId", operatorId); event.put("wsId", wsId); event.put("status", status);
-        event.put("message", message); event.put("flowLMin", flow); event.put("volumeLitres", volume);
-        event.put("elapsedSeconds", elapsed); event.put("createdAt", Instant.now().toString()); return event;
+    private Map<String, Object> crearEvento(String idSolicitud, int idOperario, int idWs, String estado,
+                                            String mensaje, double caudal, double volumen, long transcurrido) {
+        Map<String, Object> evento = new LinkedHashMap<>();
+        evento.put("type", "RIEGO_EVENT"); evento.put("requestId", idSolicitud);
+        evento.put("operatorId", idOperario); evento.put("wsId", idWs); evento.put("status", estado);
+        evento.put("message", mensaje); evento.put("flowLMin", caudal); evento.put("volumeLitres", volumen);
+        evento.put("elapsedSeconds", transcurrido); evento.put("createdAt", Instant.now().toString()); return evento;
     }
 
-    private void sendTerminal(Map<String,Object> event) {
-        String requestId = string(event.get("requestId"));
-        String status = string(event.get("status"));
-        String json;
-        try { json = JSON.writeValueAsString(event); }
+    private void enviarTerminal(Map<String, Object> evento) {
+        String idSolicitud = texto(evento.get("requestId"));
+        String estado = texto(evento.get("status"));
+        String textoJson;
+        try { textoJson = JSON.writeValueAsString(evento); }
         catch (Exception e) { System.err.println("No se pudo serializar el evento terminal: " + e.getMessage()); return; }
-        db.actualizarEstadoSolicitud(requestId, status, json);
-        enqueueTerminalEvent(requestId, String.valueOf(event.get("operatorId")), json);
+        db.actualizarEstadoSolicitud(idSolicitud, estado, textoJson);
+        encolarEventoTerminal(idSolicitud, String.valueOf(evento.get("operatorId")), textoJson);
     }
 
-    private boolean publishAsync(String topic, String key, Map<String,Object> message) {
+    private boolean publicarAsincrono(String tema, String clave, Map<String, Object> mensaje) {
         try {
-            String json = JSON.writeValueAsString(message);
-            producer.send(new ProducerRecord<>(topic, key, json), (metadata, exception) -> {
-                if (exception != null) System.err.println("Error publicando mensaje asíncrono en " + topic + ": " + exception.getMessage());
+            String textoJson = JSON.writeValueAsString(mensaje);
+            productor.send(new ProducerRecord<>(tema, clave, textoJson), (metadatos, excepcion) -> {
+                if (excepcion != null) System.err.println("Error publicando mensaje asíncrono en " + tema + ": " + excepcion.getMessage());
             });
             return true;
         } catch (Exception e) {
-            System.err.println("No se pudo encolar mensaje Kafka en " + topic + ": " + e.getMessage());
+            System.err.println("No se pudo encolar mensaje Kafka en " + tema + ": " + e.getMessage());
             return false;
         }
     }
 
-    private void enqueueTerminalEvent(String requestId, String key, String json) {
-        if (requestId == null || json == null || terminalEventsInFlight.putIfAbsent(requestId, Boolean.TRUE) != null) return;
+    private void encolarEventoTerminal(String idSolicitud, String clave, String textoJson) {
+        if (idSolicitud == null || textoJson == null || eventosTerminalesEnVuelo.putIfAbsent(idSolicitud, Boolean.TRUE) != null) return;
         try {
-            outbox.execute(() -> {
+            buzonSalida.execute(() -> {
                 try {
-                    if (publishRaw(TOPIC_RESPUESTAS, key, json)) db.marcarEventoTerminalEnviado(requestId);
+                    if (publicarDirecto(TOPICO_RESPUESTAS, clave, textoJson)) db.marcarEventoTerminalEnviado(idSolicitud);
                 } finally {
-                    terminalEventsInFlight.remove(requestId);
+                    eventosTerminalesEnVuelo.remove(idSolicitud);
                 }
             });
         } catch (RejectedExecutionException e) {
-            terminalEventsInFlight.remove(requestId);
-            System.err.println("Outbox de CENTRAL cerrado; el evento queda pendiente en SQLite para el siguiente arranque.");
+            eventosTerminalesEnVuelo.remove(idSolicitud);
+            System.err.println("Buzón de CENTRAL cerrado; el evento queda pendiente en SQLite para el siguiente arranque.");
         }
     }
 
-    private boolean publish(String topic, String key, Map<String,Object> message) {
-        try { return publishRaw(topic, key, JSON.writeValueAsString(message)); }
+    private boolean publicar(String tema, String clave, Map<String, Object> mensaje) {
+        try { return publicarDirecto(tema, clave, JSON.writeValueAsString(mensaje)); }
         catch (Exception e) { System.err.println("No se pudo serializar mensaje Kafka: " + e.getMessage()); return false; }
     }
 
-    private boolean publishRaw(String topic, String key, String json) {
+    private boolean publicarDirecto(String tema, String clave, String textoJson) {
         try {
-            producer.send(new ProducerRecord<>(topic, key, json)).get(35, TimeUnit.SECONDS);
+            productor.send(new ProducerRecord<>(tema, clave, textoJson)).get(35, TimeUnit.SECONDS);
             return true;
         } catch (Exception e) {
-            System.err.println("No se pudo publicar en " + topic + ": " + e.getMessage()); return false;
+            System.err.println("No se pudo publicar en " + tema + ": " + e.getMessage()); return false;
         }
     }
 
-    private void finish(ActiveRiego active, String status, String message) {
-        if (active == null) return;
-        synchronized (active) {
-            if (!active.terminal.compareAndSet(false, true)) return;
-            activeByWs.remove(active.wsId, active);
-            activeByRequest.remove(active.requestId, active);
-            // publishEvent usa el mismo monitor: el bloque es reentrante en Java.
-            publishEvent(active, status, message, true);
-            System.out.println("Servicio " + active.requestId + " finalizado con estado " + status + ".");
+    private void finalizarServicio(RiegoActivo activo, String estado, String mensaje) {
+        if (activo == null) return;
+        synchronized (activo) {
+            if (!activo.terminal.compareAndSet(false, true)) return;
+            activosPorWs.remove(activo.idWs, activo);
+            activosPorSolicitud.remove(activo.idSolicitud, activo);
+            // publicarEvento usa el mismo monitor: el bloque es reentrante en Java.
+            publicarEvento(activo, estado, mensaje, true);
+            System.out.println("Servicio " + activo.idSolicitud + " finalizado con estado " + estado + ".");
         }
     }
 
-    private void checkTimeoutsSafely() {
+    private void comprobarTimeouts() {
         try {
-            long now = System.currentTimeMillis();
-            for (Map.Entry<Integer, PendingControl> entry : pendingControls.entrySet()) {
-                PendingControl pending = entry.getValue();
-                if (pending != null && now - pending.createdAtMillis > 15_000L) {
-                    if (pendingControls.remove(entry.getKey(), pending)) {
-                        System.out.println("WS " + entry.getKey() + ": la orden " + pending.commandType
+            long ahora = System.currentTimeMillis();
+            for (Map.Entry<Integer, ControlPendiente> entrada : controlesPendientes.entrySet()) {
+                ControlPendiente pendiente = entrada.getValue();
+                if (pendiente != null && ahora - pendiente.creadoEnMillis > 15_000L) {
+                    if (controlesPendientes.remove(entrada.getKey(), pendiente)) {
+                        System.out.println("WS " + entrada.getKey() + ": la orden " + pendiente.tipoComando
                                 + " no se confirmó en 15 s; se libera el bloqueo de nuevas solicitudes.");
                     }
                 }
             }
-            for (ActiveRiego active : activeByRequest.values()) {
-                if (active.commandSent && !active.started && now - active.commandSentAtMillis > START_ACK_TIMEOUT_MS) {
-                    finish(active, "FAILED", "La WS no confirmó el inicio dentro del tiempo esperado.");
-                    publishWsSafetyStop(active.wsId, "STOP_IRRIGATION");
-                } else if (active.started && now - active.startedAtMillis > (active.durationSeconds + REQUEST_TIMEOUT_EXTRA_SECONDS) * 1000L) {
-                    finish(active, "FAILED", "Se agotó el tiempo máximo de supervisión del riego.");
-                    publishWsSafetyStop(active.wsId, "STOP_IRRIGATION");
+            for (RiegoActivo activo : activosPorSolicitud.values()) {
+                if (activo.comandoEnviado && !activo.iniciado && ahora - activo.comandoEnviadoEnMillis > TIMEOUT_ACK_INICIO_MS) {
+                    finalizarServicio(activo, "FAILED", "La WS no confirmó el inicio dentro del tiempo esperado.");
+                    publicarParadaSeguridad(activo.idWs, "STOP_IRRIGATION");
+                } else if (activo.iniciado && ahora - activo.iniciadoEnMillis > (activo.duracionSegundos + SEGUNDOS_EXTRA_TIMEOUT_SOLICITUD) * 1000L) {
+                    finalizarServicio(activo, "FAILED", "Se agotó el tiempo máximo de supervisión del riego.");
+                    publicarParadaSeguridad(activo.idWs, "STOP_IRRIGATION");
                 }
             }
         } catch (Exception e) { System.err.println("Error supervisando timeouts: " + e.getMessage()); }
     }
 
-    private void retryTerminalEventsSafely() {
+    private void reintentarEventosTerminales() {
         try {
-            for (Map<String,Object> row : db.listarEventosTerminalesPendientes()) {
-                String requestId = string(row.get("requestId"));
-                String json = string(row.get("terminalEvent"));
-                if (json != null) enqueueTerminalEvent(requestId, String.valueOf(row.get("operatorId")), json);
+            for (Map<String, Object> fila : db.listarEventosTerminalesPendientes()) {
+                String idSolicitud = texto(fila.get("requestId"));
+                String textoJson = texto(fila.get("terminalEvent"));
+                if (textoJson != null) encolarEventoTerminal(idSolicitud, String.valueOf(fila.get("operatorId")), textoJson);
             }
         } catch (Exception e) { System.err.println("Error reintentando notificaciones terminales: " + e.getMessage()); }
     }
 
-    private void reconcileOrphanedRequestsSafely() {
+    private void reconciliarSolicitudesHuerfanas() {
         try {
-            long now = System.currentTimeMillis();
-            for (Map<String,Object> row : db.listarSolicitudesNoTerminales()) {
-                String requestId = string(row.get("requestId"));
-                if (requestId == null || activeByRequest.containsKey(requestId)) continue;
-                int wsId = number(row.get("wsId"), -1);
-                StationSnapshot snapshot = latestStates.get(wsId);
-                if (snapshot != null && requestId.equals(snapshot.requestId)) {
-                    recoverActive(snapshot);
-                    if (activeByRequest.containsKey(requestId)) continue;
+            long ahora = System.currentTimeMillis();
+            for (Map<String, Object> fila : db.listarSolicitudesNoTerminales()) {
+                String idSolicitud = texto(fila.get("requestId"));
+                if (idSolicitud == null || activosPorSolicitud.containsKey(idSolicitud)) continue;
+                int idWs = entero(fila.get("wsId"), -1);
+                InstantaneaEstacion instantanea = ultimosEstados.get(idWs);
+                if (instantanea != null && idSolicitud.equals(instantanea.idSolicitud)) {
+                    recuperarActivo(instantanea);
+                    if (activosPorSolicitud.containsKey(idSolicitud)) continue;
                 }
-                long updatedAt = 0;
+                long actualizadoEn = 0;
                 try {
-                    String stamp = string(row.get("updatedAt"));
-                    if (stamp == null || stamp.isEmpty()) stamp = string(row.get("createdAt"));
-                    updatedAt = Instant.parse(stamp).toEpochMilli();
-                } catch (Exception ignored) { }
+                    String marca = texto(fila.get("updatedAt"));
+                    if (marca == null || marca.isEmpty()) marca = texto(fila.get("createdAt"));
+                    actualizadoEn = Instant.parse(marca).toEpochMilli();
+                } catch (Exception ignorada) { }
                 // Margen amplio para que una WS que sigue regando tras reiniciar CENTRAL
                 // pueda reconectarse y recuperar el seguimiento sin marcarse como fallida.
-                if (updatedAt > 0 && now - updatedAt < 60_000) continue;
-                int operatorId = number(row.get("operatorId"), -1);
-                Map<String,Object> event = makeEvent(requestId, operatorId, wsId, "FAILED",
+                if (actualizadoEn > 0 && ahora - actualizadoEn < 60_000) continue;
+                int idOperario = entero(fila.get("operatorId"), -1);
+                Map<String, Object> evento = crearEvento(idSolicitud, idOperario, idWs, "FAILED",
                         "CENTRAL no pudo recuperar el estado de la solicitud después de una interrupción. No se repetirá automáticamente.", 0, 0, 0);
-                sendTerminal(event);
-                HiloCentral session = sessions.get(wsId);
-                if (session != null && session.isSessionOpen()) publishWsSafetyStop(wsId, "STOP_IRRIGATION");
+                enviarTerminal(evento);
+                HiloCentral sesion = sesiones.get(idWs);
+                if (sesion != null && sesion.sesionAbierta()) publicarParadaSeguridad(idWs, "STOP_IRRIGATION");
             }
         } catch (Exception e) { System.err.println("Error reconciliando solicitudes pendientes: " + e.getMessage()); }
     }
 
-    private void publishWsSafetyStop(int wsId, String type) {
-        HiloCentral session = sessions.get(wsId);
-        if (session == null || !session.isSessionOpen()) return;
-        queueCommand(wsId, type, "safety-" + UUID.randomUUID(), 0, 0);
+    private void publicarParadaSeguridad(int idWs, String tipo) {
+        HiloCentral sesion = sesiones.get(idWs);
+        if (sesion == null || !sesion.sesionAbierta()) return;
+        encolarComando(idWs, tipo, "seguridad-" + UUID.randomUUID(), 0, 0);
     }
 
     /** Inicia un riego administrativo en una WS concreta o en todas las WS conectadas (wsId=0). */
-    public boolean adminRiego(int wsId, int durationSeconds) {
-        if (wsId < 0) {
+    public boolean adminRiego(int idWs, int duracionSegundos) {
+        if (idWs < 0) {
             System.out.println("El ID de WS debe ser positivo o 0 para todas las WS conectadas.");
             return false;
         }
-        if (durationSeconds < 1 || durationSeconds > 86400) {
+        if (duracionSegundos < 1 || duracionSegundos > 86400) {
             System.out.println("Duración inválida (1-86400 s).");
             return false;
         }
 
-        List<Integer> targets = new ArrayList<>();
-        if (wsId == 0) {
-            for (Integer id : sessions.keySet()) {
-                HiloCentral session = sessions.get(id);
-                if (session != null && session.isSessionOpen() && hasFreshStatus(id)) targets.add(id);
+        List<Integer> destinos = new ArrayList<>();
+        if (idWs == 0) {
+            for (Integer id : sesiones.keySet()) {
+                HiloCentral sesion = sesiones.get(id);
+                if (sesion != null && sesion.sesionAbierta() && estadoReciente(id)) destinos.add(id);
             }
         } else {
-            targets.add(wsId);
+            destinos.add(idWs);
         }
-        Collections.sort(targets);
-        if (targets.isEmpty()) {
+        Collections.sort(destinos);
+        if (destinos.isEmpty()) {
             System.out.println("No hay WS conectadas y con estado reciente para iniciar el riego.");
             return false;
         }
         boolean enviado = false;
-        for (Integer id : targets) enviado |= adminRiegoUnaWS(id, durationSeconds);
+        for (Integer id : destinos) enviado |= adminRiegoUnaWs(id, duracionSegundos);
         return enviado;
     }
 
-    private boolean adminRiegoUnaWS(int wsId, int durationSeconds) {
-        Map<String, Object> ws = db.obtenerWS(wsId);
-        HiloCentral session = sessions.get(wsId);
-        StationSnapshot snapshot = latestStates.get(wsId);
-        if (pendingControls.containsKey(wsId) || ws == null || !"ACTIVADA".equalsIgnoreCase(string(ws.get("state"))) ||
-                session == null || !session.isSessionOpen() || !hasFreshStatus(wsId) ||
-                snapshot == null || !"ACTIVADA".equals(snapshot.state)) {
-            System.out.println("WS " + wsId + ": omitida; no existe, no está conectada o no está ACTIVADA.");
+    private boolean adminRiegoUnaWs(int idWs, int duracionSegundos) {
+        Map<String, Object> ws = db.obtenerWS(idWs);
+        HiloCentral sesion = sesiones.get(idWs);
+        InstantaneaEstacion instantanea = ultimosEstados.get(idWs);
+        if (controlesPendientes.containsKey(idWs) || ws == null || !"ACTIVADA".equalsIgnoreCase(texto(ws.get("state"))) ||
+                sesion == null || !sesion.sesionAbierta() || !estadoReciente(idWs) ||
+                instantanea == null || !"ACTIVADA".equals(instantanea.estado)) {
+            System.out.println("WS " + idWs + ": omitida; no existe, no está conectada o no está ACTIVADA.");
             return false;
         }
 
-        ActiveRiego active = new ActiveRiego("CENTRAL-" + UUID.randomUUID(), 0, wsId, durationSeconds);
-        active.baseVolume = snapshot.volumeLitres;
-        if (!db.guardarSolicitudSiNueva(active.requestId, 0, wsId, durationSeconds)) {
-            System.out.println("WS " + wsId + ": no se pudo guardar la solicitud administrativa; no se iniciará.");
+        RiegoActivo activo = new RiegoActivo("CENTRAL-" + UUID.randomUUID(), 0, idWs, duracionSegundos);
+        activo.volumenBase = instantanea.litros;
+        if (!db.guardarSolicitudSiNueva(activo.idSolicitud, 0, idWs, duracionSegundos)) {
+            System.out.println("WS " + idWs + ": no se pudo guardar la solicitud administrativa; no se iniciará.");
             return false;
         }
-        ActiveRiego previous = activeByWs.putIfAbsent(wsId, active);
-        if (previous != null) {
-            finish(active, "REJECTED", "La WS ya tiene un servicio en curso.");
+        RiegoActivo previo = activosPorWs.putIfAbsent(idWs, activo);
+        if (previo != null) {
+            finalizarServicio(activo, "REJECTED", "La WS ya tiene un servicio en curso.");
             return false;
         }
-        activeByRequest.put(active.requestId, active);
-        db.actualizarEstadoSolicitud(active.requestId, "AUTHORIZED", null);
-        publishEvent(active, "AUTHORIZED", "Riego iniciado desde el menú administrativo de CENTRAL.", false);
+        activosPorSolicitud.put(activo.idSolicitud, activo);
+        db.actualizarEstadoSolicitud(activo.idSolicitud, "AUTHORIZED", null);
+        publicarEvento(activo, "AUTHORIZED", "Riego iniciado desde el menú administrativo de CENTRAL.", false);
 
-        queueCommand(wsId, "START_IRRIGATION", active.requestId, 0, durationSeconds);
-        active.commandSent = true;
-        active.commandSentAtMillis = System.currentTimeMillis();
-        System.out.println("Riego administrativo encolado para WS " + wsId + ".");
+        encolarComando(idWs, "START_IRRIGATION", activo.idSolicitud, 0, duracionSegundos);
+        activo.comandoEnviado = true;
+        activo.comandoEnviadoEnMillis = System.currentTimeMillis();
+        System.out.println("Riego administrativo encolado para WS " + idWs + ".");
         return true;
     }
 
     /** Envía una orden a una WS concreta o a todas las WS conectadas (wsId=0). */
-    public boolean adminOrden(String type, int wsId) {
-        if (!Arrays.asList("BLOCK_WS", "ACTIVATE_WS", "STOP_IRRIGATION").contains(type)) {
-            System.out.println("Orden administrativa desconocida: " + type);
+    public boolean adminOrden(String tipo, int idWs) {
+        if (!Arrays.asList("BLOCK_WS", "ACTIVATE_WS", "STOP_IRRIGATION").contains(tipo)) {
+            System.out.println("Orden administrativa desconocida: " + tipo);
             return false;
         }
-        if (wsId < 0) {
+        if (idWs < 0) {
             System.out.println("El ID de WS debe ser positivo o 0 para todas las WS conectadas.");
             return false;
         }
 
         List<Integer> ids = new ArrayList<>();
-        if (wsId == 0) {
-            for (Map.Entry<Integer, HiloCentral> entry : sessions.entrySet()) {
-                if (entry.getValue().isSessionOpen() && hasFreshStatus(entry.getKey())) ids.add(entry.getKey());
+        if (idWs == 0) {
+            for (Map.Entry<Integer, HiloCentral> entrada : sesiones.entrySet()) {
+                if (entrada.getValue().sesionAbierta() && estadoReciente(entrada.getKey())) ids.add(entrada.getKey());
             }
         } else {
-            HiloCentral session = sessions.get(wsId);
-            if (session != null && session.isSessionOpen() && hasFreshStatus(wsId)) ids.add(wsId);
+            HiloCentral sesion = sesiones.get(idWs);
+            if (sesion != null && sesion.sesionAbierta() && estadoReciente(idWs)) ids.add(idWs);
         }
         Collections.sort(ids);
         if (ids.isEmpty()) {
@@ -821,26 +861,26 @@ public final class CentralService implements AutoCloseable {
         }
 
         for (Integer id : ids) {
-            PendingControl pending = null;
-            if ("BLOCK_WS".equals(type)) pending = new PendingControl(type, "FUERA_SERVICIO");
-            else if ("ACTIVATE_WS".equals(type)) pending = new PendingControl(type, "ACTIVADA");
-            if (pending != null) pendingControls.put(id, pending);
+            ControlPendiente pendiente = null;
+            if ("BLOCK_WS".equals(tipo)) pendiente = new ControlPendiente(tipo, "FUERA_SERVICIO");
+            else if ("ACTIVATE_WS".equals(tipo)) pendiente = new ControlPendiente(tipo, "ACTIVADA");
+            if (pendiente != null) controlesPendientes.put(id, pendiente);
 
-            queueCommand(id, type, "CENTRAL-" + UUID.randomUUID(), 0, 0);
-            System.out.println(type + " encolada para WS " + id
+            encolarComando(id, tipo, "CENTRAL-" + UUID.randomUUID(), 0, 0);
+            System.out.println(tipo + " encolada para WS " + id
                     + "; la WS no se considera en el nuevo estado hasta recibir confirmación.");
         }
         return true;
     }
 
-    private void publishHeartbeatSafely() {
-        if (!running.get()) return;
+    private void publicarLatido() {
+        if (!ejecutando.get()) return;
         try {
             Map<String, Object> latido = new LinkedHashMap<>();
             latido.put("type", "CENTRAL_HEARTBEAT");
-            latido.put("stations", sessions.size());
+            latido.put("stations", sesiones.size());
             latido.put("createdAt", Instant.now().toString());
-            producer.send(new ProducerRecord<>(TOPIC_LATIDO, "central", JSON.writeValueAsString(latido)));
+            productor.send(new ProducerRecord<>(TOPICO_LATIDO, "central", JSON.writeValueAsString(latido)));
         } catch (Exception e) {
             // Kafka puede estar temporalmente caído; el latido se reintenta en el
             // siguiente ciclo y no debe afectar al servicio de sockets de CENTRAL.
@@ -853,7 +893,7 @@ public final class CentralService implements AutoCloseable {
     public void panelSiCambia() { mostrarPanel(false); }
 
     public void mostrarPanel(boolean forzar) {
-        List<Map<String,Object>> estaciones = db.listarWS();
+        List<Map<String, Object>> estaciones = db.listarWS();
         StringBuilder firma = new StringBuilder();
         StringBuilder texto = new StringBuilder();
         texto.append("\n================= PANEL WM_CENTRAL (").append(hora()).append(") =================\n");
@@ -862,23 +902,23 @@ public final class CentralService implements AutoCloseable {
         texto.append("--------------------------------------------------------------------------------\n");
         if (estaciones.isEmpty()) texto.append("No hay estaciones WS registradas.\n");
 
-        for (Map<String,Object> fila : estaciones) {
-            int id = number(fila.get("wsId"), -1);
+        for (Map<String, Object> fila : estaciones) {
+            int id = entero(fila.get("wsId"), -1);
             if (id <= 0) continue;
-            HiloCentral sesion = sessions.get(id);
-            StationSnapshot snapshot = latestStates.get(id);
-            boolean enLinea = sesion != null && sesion.isSessionOpen() && hasFreshStatus(id) && snapshot != null;
-            String estado = enLinea ? snapshot.state : "DESCONECTADA";
+            HiloCentral sesion = sesiones.get(id);
+            InstantaneaEstacion instantanea = ultimosEstados.get(id);
+            boolean enLinea = sesion != null && sesion.sesionAbierta() && estadoReciente(id) && instantanea != null;
+            String estado = enLinea ? instantanea.estado : "DESCONECTADA";
             double aguaDb = numero(fila.get("volumeLitres"), 0);
-            double agua = enLinea ? Math.max(snapshot.volumeLitres, aguaDb) : aguaDb;
+            double agua = enLinea ? Math.max(instantanea.litros, aguaDb) : aguaDb;
 
             String detalle = "";
             if ("REGANDO".equals(estado)) {
-                ActiveRiego activo = activeByWs.get(id);
-                double servicio = activo != null ? Math.max(0, snapshot.volumeLitres - activo.baseVolume)
-                        : snapshot.volumeLitres;
-                detalle = "Caudal: " + fmt(snapshot.flowLMin) + " L/min | Servicio: " + fmt(servicio)
-                        + " L | Operario: " + (snapshot.operatorId > 0 ? snapshot.operatorId : "-");
+                RiegoActivo activo = activosPorWs.get(id);
+                double servicio = activo != null ? Math.max(0, instantanea.litros - activo.volumenBase)
+                        : instantanea.litros;
+                detalle = "Caudal: " + fmt(instantanea.caudalLMin) + " L/min | Servicio: " + fmt(servicio)
+                        + " L | Operario: " + (instantanea.idOperario > 0 ? instantanea.idOperario : "-");
             } else if ("FUGA".equals(estado)) {
                 detalle = "Fuga/avería detectada; riego detenido";
             } else if ("FUERA_SERVICIO".equals(estado)) {
@@ -892,8 +932,8 @@ public final class CentralService implements AutoCloseable {
                     estadoColoreado(estado), fmt(agua) + " L", detalle));
             firma.append(id).append('|').append(estado).append('|')
                     .append(Math.round(agua * 10)).append('|')
-                    .append(enLinea ? Math.round(snapshot.flowLMin * 10) : 0).append('|')
-                    .append(enLinea ? snapshot.operatorId : -1).append(';');
+                    .append(enLinea ? Math.round(instantanea.caudalLMin * 10) : 0).append('|')
+                    .append(enLinea ? instantanea.idOperario : -1).append(';');
         }
         texto.append("================================================================================\n");
 
@@ -942,177 +982,178 @@ public final class CentralService implements AutoCloseable {
         catch (Exception e) { return porDefecto; }
     }
 
-    public List<Map<String,Object>> listarWS() { return db.listarWS(); }
+    public List<Map<String, Object>> listarWS() { return db.listarWS(); }
 
     /**
      * Vista de solo lectura para la interfaz gráfica: reúne la información de SQLite y
      * del último estado recibido de cada monitor. El estado efectivo de una estación
      * sin sesión válida es siempre DESCONECTADA.
      */
-    public List<StationView> vistaEstaciones() {
-        List<Map<String,Object>> estaciones = db.listarWS();
-        List<StationView> vista = new ArrayList<>();
-        for (Map<String,Object> fila : estaciones) {
-            int id = number(fila.get("wsId"), -1);
+    public List<VistaEstacion> vistaEstaciones() {
+        List<Map<String, Object>> estaciones = db.listarWS();
+        List<VistaEstacion> vista = new ArrayList<>();
+        for (Map<String, Object> fila : estaciones) {
+            int id = entero(fila.get("wsId"), -1);
             if (id <= 0) continue;
 
-            HiloCentral sesion = sessions.get(id);
-            StationSnapshot snapshot = latestStates.get(id);
-            boolean enLinea = sesion != null && sesion.isSessionOpen() && hasFreshStatus(id) && snapshot != null;
+            HiloCentral sesion = sesiones.get(id);
+            InstantaneaEstacion instantanea = ultimosEstados.get(id);
+            boolean enLinea = sesion != null && sesion.sesionAbierta() && estadoReciente(id) && instantanea != null;
 
-            String estado = enLinea ? snapshot.state : "DESCONECTADA";
+            String estado = enLinea ? instantanea.estado : "DESCONECTADA";
             double aguaDb = numero(fila.get("volumeLitres"), 0);
-            double agua = enLinea ? Math.max(snapshot.volumeLitres, aguaDb) : aguaDb;
-            double caudal = enLinea ? snapshot.flowLMin : 0;
-            long segundos = enLinea ? snapshot.elapsedSeconds : 0;
-            int operario = enLinea ? snapshot.operatorId : 0;
-            String requestId = enLinea ? snapshot.requestId : null;
+            double agua = enLinea ? Math.max(instantanea.litros, aguaDb) : aguaDb;
+            double caudal = enLinea ? instantanea.caudalLMin : 0;
+            long segundos = enLinea ? instantanea.segundos : 0;
+            int idOperario = enLinea ? instantanea.idOperario : 0;
+            String idSolicitud = enLinea ? instantanea.idSolicitud : null;
 
-            ActiveRiego activo = activeByWs.get(id);
+            RiegoActivo activo = activosPorWs.get(id);
             double servicio = enLinea && activo != null
-                    ? Math.max(0, snapshot.volumeLitres - activo.baseVolume) : 0;
+                    ? Math.max(0, instantanea.litros - activo.volumenBase) : 0;
 
-            PendingControl pendiente = pendingControls.get(id);
-            vista.add(new StationView(id, String.valueOf(fila.get("location")), estado, enLinea,
-                    agua, caudal, servicio, segundos, operario, requestId,
-                    pendiente == null ? null : pendiente.commandType));
+            ControlPendiente pendiente = controlesPendientes.get(id);
+            vista.add(new VistaEstacion(id, String.valueOf(fila.get("location")), estado, enLinea,
+                    agua, caudal, servicio, segundos, idOperario, idSolicitud,
+                    pendiente == null ? null : pendiente.tipoComando));
         }
         return vista;
     }
 
-    private boolean hasFreshStatus(int wsId) {
-        StationSnapshot snapshot = latestStates.get(wsId);
-        return snapshot != null && System.currentTimeMillis() - snapshot.seenAtMillis <= MAX_STATION_STATUS_AGE_MS;
+    private boolean estadoReciente(int idWs) {
+        InstantaneaEstacion instantanea = ultimosEstados.get(idWs);
+        return instantanea != null && System.currentTimeMillis() - instantanea.vistoEnMillis <= ANTIGUEDAD_MAXIMA_ESTADO_MS;
     }
 
-    private List<Map<String,Object>> listarWSDisponiblesEnLinea() {
-        List<Map<String,Object>> disponibles = db.listarWSDisponibles();
+    private List<Map<String, Object>> listarWsDisponiblesEnLinea() {
+        List<Map<String, Object>> disponibles = db.listarWSDisponibles();
         disponibles.removeIf(ws -> {
-            int id = number(ws.get("wsId"), -1);
-            HiloCentral session = sessions.get(id);
-            StationSnapshot snapshot = latestStates.get(id);
-            return session == null || !session.isSessionOpen() || !hasFreshStatus(id) ||
-                    snapshot == null || !"ACTIVADA".equals(snapshot.state) || activeByWs.containsKey(id) || pendingControls.containsKey(id);
+            int id = entero(ws.get("wsId"), -1);
+            HiloCentral sesion = sesiones.get(id);
+            InstantaneaEstacion instantanea = ultimosEstados.get(id);
+            return sesion == null || !sesion.sesionAbierta() || !estadoReciente(id) ||
+                    instantanea == null || !"ACTIVADA".equals(instantanea.estado) || activosPorWs.containsKey(id) || controlesPendientes.containsKey(id);
         });
         return disponibles;
     }
 
-    public List<Map<String,Object>> listarOperarios() { return db.listarOperarios(); }
+    public List<Map<String, Object>> listarOperarios() { return db.listarOperarios(); }
     public boolean registrarOperario(int id, String nombre) { return db.registrarOperario(id, nombre); }
     public boolean buscarOperario(int id) { return db.buscarOperario(id); }
-    public boolean isRunning() { return running.get(); }
+    public boolean estaEjecutando() { return ejecutando.get(); }
 
     @Override public void close() {
-        if (!running.compareAndSet(true, false)) return;
-        scheduler.shutdownNow();
-        if (kafkaThread != null) kafkaThread.interrupt();
-        List<HiloCentral> openSessions = new ArrayList<>(sessions.values());
-        for (HiloCentral s : openSessions) s.closeFromReplacement();
-        for (HiloCentral s : openSessions) {
+        if (!ejecutando.compareAndSet(true, false)) return;
+        planificador.shutdownNow();
+        if (hiloKafka != null) hiloKafka.interrupt();
+        List<HiloCentral> sesionesAbiertas = new ArrayList<>(sesiones.values());
+        for (HiloCentral s : sesionesAbiertas) s.cerrarDesdeReemplazo();
+        for (HiloCentral s : sesionesAbiertas) {
             if (s != Thread.currentThread()) {
                 try { s.join(1500L); }
                 catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
             }
         }
-        sessions.clear();
-        outbox.shutdown();
-        try { outbox.awaitTermination(3, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        try { producer.close(Duration.ofSeconds(5)); } catch (Exception ignored) { }
+        sesiones.clear();
+        buzonSalida.shutdown();
+        try { buzonSalida.awaitTermination(3, TimeUnit.SECONDS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        try { productor.close(Duration.ofSeconds(5)); } catch (Exception ignorada) { }
     }
 
-    private static boolean isTerminal(String state) {
-        if (state == null) return false;
-        return Arrays.asList("COMPLETED", "REJECTED", "FAILED", "CANCELLED").contains(state.toUpperCase(Locale.ROOT));
+    private static boolean esTerminal(String estado) {
+        if (estado == null) return false;
+        return Arrays.asList("COMPLETED", "REJECTED", "FAILED", "CANCELLED").contains(estado.toUpperCase(Locale.ROOT));
     }
-    private static String string(Object x) { return x == null ? null : String.valueOf(x); }
-    private static String emptyToNull(String x) { return x == null || x.trim().isEmpty() ? null : x; }
-    private static int number(Object x, int fallback) {
-        if (x instanceof Number) return ((Number)x).intValue();
-        try { return Integer.parseInt(String.valueOf(x)); } catch (Exception e) { return fallback; }
+    private static String texto(Object x) { return x == null ? null : String.valueOf(x); }
+    private static String vacioANulo(String x) { return x == null || x.trim().isEmpty() ? null : x; }
+    private static int entero(Object x, int porDefecto) {
+        if (x instanceof Number) return ((Number) x).intValue();
+        try { return Integer.parseInt(String.valueOf(x)); } catch (Exception e) { return porDefecto; }
     }
-    private static double decimal(String x, double fallback) {
-        try { double d = Double.parseDouble(x); return Double.isFinite(d) ? d : fallback; } catch (Exception e) { return fallback; }
+    private static double decimal(String x, double porDefecto) {
+        try { double d = Double.parseDouble(x); return Double.isFinite(d) ? d : porDefecto; } catch (Exception e) { return porDefecto; }
     }
-    private static long longNumber(String x, long fallback) { try { return Long.parseLong(x); } catch (Exception e) { return fallback; } }
-    private static Throwable rootCause(Throwable e) { Throwable c=e; while(c.getCause()!=null && c.getCause()!=c)c=c.getCause(); return c; }
-    private static void sleep(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
+    private static long enteroLargo(String x, long porDefecto) { try { return Long.parseLong(x); } catch (Exception e) { return porDefecto; } }
+    private static Throwable causaRaiz(Throwable e) { Throwable c = e; while (c.getCause() != null && c.getCause() != c) c = c.getCause(); return c; }
+    private static void dormir(long ms) { try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); } }
 
-    private static boolean requestTimestampIsFresh(Object value) {
-        if (value == null) return false;
+    private static boolean marcaTiempoFresca(Object valor) {
+        if (valor == null) return false;
         try {
-            long timestamp = Instant.parse(String.valueOf(value)).toEpochMilli();
-            long now = System.currentTimeMillis();
+            long marca = Instant.parse(String.valueOf(valor)).toEpochMilli();
+            long ahora = System.currentTimeMillis();
             // Se admiten 5 minutos de antigüedad y hasta 15 minutos de desviación futura.
-            return timestamp >= now - TimeUnit.MINUTES.toMillis(5)
-                    && timestamp <= now + TimeUnit.MINUTES.toMillis(15);
+            return marca >= ahora - TimeUnit.MINUTES.toMillis(5)
+                    && marca <= ahora + TimeUnit.MINUTES.toMillis(15);
         } catch (Exception e) {
             return false;
         }
     }
 
-    private static final class PendingControl {
-        final String commandType;
-        final String expectedState;
-        final long createdAtMillis = System.currentTimeMillis();
-        PendingControl(String commandType, String expectedState) {
-            this.commandType = commandType;
-            this.expectedState = expectedState;
+    private static final class ControlPendiente {
+        final String tipoComando;
+        final String estadoEsperado;
+        final long creadoEnMillis = System.currentTimeMillis();
+        ControlPendiente(String tipoComando, String estadoEsperado) {
+            this.tipoComando = tipoComando;
+            this.estadoEsperado = estadoEsperado;
         }
     }
 
-    private static final class ActiveRiego {
-        final String requestId; final int operatorId; final int wsId; final int durationSeconds;
-        final long createdAtMillis = System.currentTimeMillis();
+    private static final class RiegoActivo {
+        final String idSolicitud; final int idOperario; final int idWs; final int duracionSegundos;
+        final long creadoEnMillis = System.currentTimeMillis();
         final AtomicBoolean terminal = new AtomicBoolean(false);
-        volatile boolean started; volatile long startedAtMillis;
-        volatile boolean commandSent; volatile long commandSentAtMillis;
-        volatile double lastFlow; volatile double lastVolume; volatile long lastElapsed;
+        volatile boolean iniciado; volatile long iniciadoEnMillis;
+        volatile boolean comandoEnviado; volatile long comandoEnviadoEnMillis;
+        volatile double ultimoCaudal; volatile double ultimoVolumen; volatile long ultimoTiempo;
         // Volumen total de la estación en el momento de autorizar el riego: permite
         // informar al operario del consumo exacto de SU servicio.
-        volatile double baseVolume;
-        ActiveRiego(String requestId, int operatorId, int wsId, int durationSeconds) {
-            this.requestId=requestId; this.operatorId=operatorId; this.wsId=wsId;
-            this.durationSeconds=durationSeconds;
-            this.lastVolume=0.0;
+        volatile double volumenBase;
+        RiegoActivo(String idSolicitud, int idOperario, int idWs, int duracionSegundos) {
+            this.idSolicitud = idSolicitud; this.idOperario = idOperario; this.idWs = idWs;
+            this.duracionSegundos = duracionSegundos;
+            this.ultimoVolumen = 0.0;
         }
     }
+
     /** Datos de una estación para la vista gráfica de WM_Central. */
-    public static final class StationView {
-        public final int wsId;
-        public final String location;
-        public final String state;
-        public final boolean online;
-        public final double volumeLitres;
-        public final double flowLMin;
-        public final double serviceLitres;
-        public final long elapsedSeconds;
-        public final int operatorId;
-        public final String requestId;
-        public final String pendingControl;
+    public static final class VistaEstacion {
+        public final int idWs;
+        public final String ubicacion;
+        public final String estado;
+        public final boolean enLinea;
+        public final double litros;
+        public final double caudalLMin;
+        public final double litrosServicio;
+        public final long segundos;
+        public final int idOperario;
+        public final String idSolicitud;
+        public final String controlPendiente;
 
-        StationView(int wsId, String location, String state, boolean online,
-                    double volumeLitres, double flowLMin, double serviceLitres,
-                    long elapsedSeconds, int operatorId, String requestId, String pendingControl) {
-            this.wsId = wsId;
-            this.location = location;
-            this.state = state;
-            this.online = online;
-            this.volumeLitres = volumeLitres;
-            this.flowLMin = flowLMin;
-            this.serviceLitres = serviceLitres;
-            this.elapsedSeconds = elapsedSeconds;
-            this.operatorId = operatorId;
-            this.requestId = requestId;
-            this.pendingControl = pendingControl;
+        VistaEstacion(int idWs, String ubicacion, String estado, boolean enLinea,
+                      double litros, double caudalLMin, double litrosServicio,
+                      long segundos, int idOperario, String idSolicitud, String controlPendiente) {
+            this.idWs = idWs;
+            this.ubicacion = ubicacion;
+            this.estado = estado;
+            this.enLinea = enLinea;
+            this.litros = litros;
+            this.caudalLMin = caudalLMin;
+            this.litrosServicio = litrosServicio;
+            this.segundos = segundos;
+            this.idOperario = idOperario;
+            this.idSolicitud = idSolicitud;
+            this.controlPendiente = controlPendiente;
         }
     }
 
-    private static final class StationSnapshot {
-        final int wsId; final String state; final double flowLMin; final double volumeLitres;
-        final long elapsedSeconds; final String requestId; final int operatorId; final long seenAtMillis;
-        StationSnapshot(int id,String s,double f,double v,long e,String r,int o,long t) {
-            wsId=id; state=s; flowLMin=f; volumeLitres=v; elapsedSeconds=e; requestId=r; operatorId=o; seenAtMillis=t;
+    private static final class InstantaneaEstacion {
+        final int idWs; final String estado; final double caudalLMin; final double litros;
+        final long segundos; final String idSolicitud; final int idOperario; final long vistoEnMillis;
+        InstantaneaEstacion(int id, String e, double c, double l, long s, String r, int o, long t) {
+            idWs = id; estado = e; caudalLMin = c; litros = l; segundos = s; idSolicitud = r; idOperario = o; vistoEnMillis = t;
         }
-        StationSnapshot withState(String s) { return new StationSnapshot(wsId,s,flowLMin,volumeLitres,elapsedSeconds,requestId,operatorId,System.currentTimeMillis()); }
+        InstantaneaEstacion conEstado(String e) { return new InstantaneaEstacion(idWs, e, caudalLMin, litros, segundos, idSolicitud, idOperario, System.currentTimeMillis()); }
     }
 }

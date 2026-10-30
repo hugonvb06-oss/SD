@@ -31,7 +31,7 @@ public final class ServidorCentral {
             socketPort = args.length >= 1 ? Integer.parseInt(args[0].trim()) : envInt("WM_CENTRAL_PORT", 5000);
             kafkaHost = args.length >= 2 ? args[1].trim() : env("WM_KAFKA_HOST", "localhost");
             kafkaPort = args.length >= 3 ? Integer.parseInt(args[2].trim()) : envInt("WM_KAFKA_PORT", 9092);
-            dbPath = args.length >= 4 ? args[3].trim() : env("WM_DB_PATH", findDatabasePath());
+            dbPath = args.length >= 4 ? args[3].trim() : env("WM_DB_PATH", buscarRutaBaseDatos());
         } catch (NumberFormatException e) {
             System.err.println("Los puertos deben ser números enteros.");
             System.err.println("Uso: java ServidorCentral [puertoSocket] [ipBroker] [puertoBroker] [rutaSQLite]");
@@ -52,7 +52,7 @@ public final class ServidorCentral {
             // monitor vuelva a conectar y envíe su primer estado.
             db.desconectarTodasWS();
             central = new CentralService(db, kafkaHost, kafkaPort);
-            central.start();
+            central.iniciar();
 
             final CentralService servicio = central;
             final BaseDatos baseDatos = db;
@@ -68,15 +68,15 @@ public final class ServidorCentral {
             System.out.println("WS autorizadas           : " + env("WM_WS_ALLOWED_IDS", "(todas las válidas)"));
             System.out.println("====================================================");
 
-            boolean graphical = false;
+            boolean grafico = false;
             if (UiSupport.guiEnabled()) {
-                graphical = launchGui(servicio, socketPort, kafkaHost, kafkaPort, dbPath);
+                grafico = lanzarInterfaz(servicio, socketPort, kafkaHost, kafkaPort, dbPath);
             }
-            if (!graphical) {
+            if (!grafico) {
                 // Sin escritorio (Docker, servidores) se mantiene el panel y el menú de consola.
                 central.mostrarPanel(true);
                 iniciarPanel(central);
-                startAdminConsole(central);
+                iniciarConsolaAdmin(central);
             }
 
             try (ServerSocket server = new ServerSocket()) {
@@ -104,8 +104,8 @@ public final class ServidorCentral {
         }
     }
 
-    private static boolean launchGui(CentralService central, int socketPort, String kafkaHost,
-                                     int kafkaPort, String dbPath) {
+    private static boolean lanzarInterfaz(CentralService central, int socketPort, String kafkaHost,
+                                          int kafkaPort, String dbPath) {
         try {
             SwingUtilities.invokeAndWait(() -> {
                 CentralFrame frame = new CentralFrame(central, socketPort, kafkaHost, kafkaPort, dbPath);
@@ -122,7 +122,7 @@ public final class ServidorCentral {
 
     private static void iniciarPanel(CentralService central) {
         Thread panel = new Thread(() -> {
-            while (central.isRunning()) {
+            while (central.estaEjecutando()) {
                 try {
                     central.panelSiCambia();
                     Thread.sleep(1_000L);
@@ -138,10 +138,10 @@ public final class ServidorCentral {
         panel.start();
     }
 
-    private static void startAdminConsole(CentralService central) {
+    private static void iniciarConsolaAdmin(CentralService central) {
         Thread admin = new Thread(() -> {
             Scanner in = new Scanner(System.in);
-            while (central.isRunning()) {
+            while (central.estaEjecutando()) {
                 try {
                     System.out.println("\n--- ADMIN CENTRAL (0 vuelve a mostrar el menú; no apaga CENTRAL) ---");
                     System.out.println("1. Mostrar panel   | 2. Registrar operario | 3. Mostrar operarios");
@@ -153,7 +153,7 @@ public final class ServidorCentral {
                     switch (option) {
                         case "1": central.mostrarPanel(true); break;
                         case "2":
-                            int id = positiveInt(in, "ID de operario: ");
+                            int id = enteroPositivo(in, "ID de operario: ");
                             System.out.print("Nombre: ");
                             if (!in.hasNextLine()) return;
                             String name = in.nextLine().trim();
@@ -169,19 +169,19 @@ public final class ServidorCentral {
                             }
                             break;
                         case "4":
-                            int wsId = nonNegativeInt(in, "ID de WS (0=todas conectadas y disponibles): ");
-                            int seconds = positiveInt(in, "Duración en segundos (1-86400): ");
-                            if (seconds > 86400) System.out.println("La duración máxima es 86400 segundos.");
-                            else central.adminRiego(wsId, seconds);
+                            int wsId = enteroNoNegativo(in, "ID de WS (0=todas conectadas y disponibles): ");
+                            int segundos = enteroPositivo(in, "Duración en segundos (1-86400): ");
+                            if (segundos > 86400) System.out.println("La duración máxima es 86400 segundos.");
+                            else central.adminRiego(wsId, segundos);
                             break;
                         case "5":
-                            central.adminOrden("BLOCK_WS", nonNegativeInt(in, "ID de WS (0=todas conectadas): "));
+                            central.adminOrden("BLOCK_WS", enteroNoNegativo(in, "ID de WS (0=todas conectadas): "));
                             break;
                         case "6":
-                            central.adminOrden("ACTIVATE_WS", nonNegativeInt(in, "ID de WS (0=todas conectadas): "));
+                            central.adminOrden("ACTIVATE_WS", enteroNoNegativo(in, "ID de WS (0=todas conectadas): "));
                             break;
                         case "7":
-                            central.adminOrden("STOP_IRRIGATION", nonNegativeInt(in, "ID de WS (0=todas conectadas): "));
+                            central.adminOrden("STOP_IRRIGATION", enteroNoNegativo(in, "ID de WS (0=todas conectadas): "));
                             break;
                         case "0": System.out.println("CENTRAL sigue activo."); break;
                         default: System.out.println("Opción no válida.");
@@ -195,7 +195,7 @@ public final class ServidorCentral {
         admin.start();
     }
 
-    private static int positiveInt(Scanner in, String prompt) {
+    private static int enteroPositivo(Scanner in, String prompt) {
         while (true) {
             System.out.print(prompt);
             if (!in.hasNextLine()) return 1;
@@ -208,7 +208,7 @@ public final class ServidorCentral {
         }
     }
 
-    private static int nonNegativeInt(Scanner in, String prompt) {
+    private static int enteroNoNegativo(Scanner in, String prompt) {
         while (true) {
             System.out.print(prompt);
             if (!in.hasNextLine()) return 0;
@@ -221,7 +221,7 @@ public final class ServidorCentral {
         }
     }
 
-    private static String findDatabasePath() {
+    private static String buscarRutaBaseDatos() {
         String[] candidates = {
                 "database/watermanagement.db",
                 "../database/watermanagement.db",

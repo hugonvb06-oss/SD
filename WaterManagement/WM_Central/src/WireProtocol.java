@@ -20,7 +20,7 @@ public final class WireProtocol {
 
     private WireProtocol() { }
 
-    public static void sendControl(OutputStream out, int control) throws IOException {
+    public static void enviarControl(OutputStream out, int control) throws IOException {
         if (control != ENQ && control != ACK && control != NACK && control != EOT) {
             throw new IllegalArgumentException("Byte de control no válido: " + control);
         }
@@ -30,7 +30,7 @@ public final class WireProtocol {
         }
     }
 
-    public static void sendFrame(OutputStream out, String data) throws IOException {
+    public static void enviarTrama(OutputStream out, String data) throws IOException {
         if (data == null || data.indexOf((char) STX) >= 0 || data.indexOf((char) ETX) >= 0) {
             throw new IllegalArgumentException("Mensaje nulo o con caracteres STX/ETX reservados");
         }
@@ -46,15 +46,15 @@ public final class WireProtocol {
     }
 
     /** Lee una trama completa; el primer byte de la trama todavía está por leer. */
-    public static String readFrame(InputStream in) throws IOException {
+    public static String leerTrama(InputStream in) throws IOException {
         int first = in.read();
         if (first < 0) throw new EOFException("Socket cerrado mientras se esperaba STX");
         if (first != STX) throw new IOException("Se esperaba STX; recibido " + first);
-        return readFrameAfterStx(in);
+        return leerTramaTrasStx(in);
     }
 
     /** Lee DATA, ETX y LRC; el llamador ya ha consumido STX. */
-    public static String readFrameAfterStx(InputStream in) throws IOException {
+    public static String leerTramaTrasStx(InputStream in) throws IOException {
         ByteArrayOutputStream data = new ByteArrayOutputStream();
         int value;
         while ((value = in.read()) != ETX) {

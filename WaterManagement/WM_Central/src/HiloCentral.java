@@ -15,11 +15,11 @@ import java.util.List;
 public final class HiloCentral extends Thread {
     private final Socket socket;
     private final CentralService central;
-    private volatile int wsId = -1;
-    private volatile boolean registered;
-    private volatile boolean closed;
-    private InputStream in;
-    private OutputStream out;
+    private volatile int idWs = -1;
+    private volatile boolean registrada;
+    private volatile boolean cerrada;
+    private InputStream entrada;
+    private OutputStream salida;
 
     public HiloCentral(Socket socket, CentralService central) {
         super("wm-central-ws-socket-" + socket.getRemoteSocketAddress());
@@ -28,162 +28,162 @@ public final class HiloCentral extends Thread {
         setDaemon(true);
     }
 
-    @Override 
+    @Override
     public void run() {
         try {
             socket.setKeepAlive(true);
             socket.setSoTimeout(6_000); // el monitor envía estado cada segundo
-            in = new BufferedInputStream(socket.getInputStream());
-            out = new BufferedOutputStream(socket.getOutputStream());
+            entrada = new BufferedInputStream(socket.getInputStream());
+            salida = new BufferedOutputStream(socket.getOutputStream());
 
-            int enq = in.read();
+            int enq = entrada.read();
             if (enq != WireProtocol.ENQ) {
-                WireProtocol.sendControl(out, WireProtocol.NACK);
+                WireProtocol.enviarControl(salida, WireProtocol.NACK);
                 throw new IOException("Se esperaba ENQ al establecer la sesión");
             }
-            WireProtocol.sendControl(out, WireProtocol.ACK);
+            WireProtocol.enviarControl(salida, WireProtocol.ACK);
 
-            String hello = receiveClientFrame();
-            if (hello == null) throw new EOFException("La WS cerró el socket durante el saludo");
-            String helloAnswer = processHello(hello);
-            sendAnswerAndWaitAck(helloAnswer);
-            if (!registered) throw new IOException("La WS no pudo registrarse/autenticarse: " + helloAnswer);
+            String saludo = recibirTramaCliente();
+            if (saludo == null) throw new EOFException("La WS cerró el socket durante el saludo");
+            String respuestaSaludo = procesarSaludo(saludo);
+            enviarRespuestaYEsperarAck(respuestaSaludo);
+            if (!registrada) throw new IOException("La WS no pudo registrarse/autenticarse: " + respuestaSaludo);
 
-            System.out.println("WS " + wsId + " autenticada; sesión persistente establecida.");
-            while (!closed && !socket.isClosed()) {
-                String message = receiveClientFrame();
-                if (message == null) break; // EOT del monitor
-                String answer = processMessage(message);
-                List<String> commands = central.takeCommands(wsId);
-                String respuesta = appendCommands(answer, commands);
+            System.out.println("WS " + idWs + " autenticada; sesión persistente establecida.");
+            while (!cerrada && !socket.isClosed()) {
+                String mensaje = recibirTramaCliente();
+                if (mensaje == null) break; // EOT del monitor
+                String respuesta = procesarMensaje(mensaje);
+                List<String> comandos = central.tomarComandos(idWs);
+                String respuestaFinal = adjuntarComandos(respuesta, comandos);
                 try {
-                    sendAnswerAndWaitAck(respuesta);
+                    enviarRespuestaYEsperarAck(respuestaFinal);
                 } catch (IOException e) {
                     // Las órdenes no llegaron a confirmarse: se reencolan para la
                     // siguiente sesión en lugar de perderse.
-                    central.requeueCommands(wsId, commands);
+                    central.reencolarComandos(idWs, comandos);
                     throw e;
                 }
             }
         } catch (SocketTimeoutException e) {
-            if (!closed) System.err.println("Timeout de comunicación con WS " + wsId + "; se marca desconectada.");
+            if (!cerrada) System.err.println("Timeout de comunicación con WS " + idWs + "; se marca desconectada.");
         } catch (IOException e) {
-            if (!closed) System.err.println("Conexión de WS " + wsId + " finalizada: " + e.getMessage());
+            if (!cerrada) System.err.println("Conexión de WS " + idWs + " finalizada: " + e.getMessage());
         } catch (RuntimeException e) {
-            if (!closed) System.err.println("Error atendiendo WS " + wsId + ": " + e.getMessage());
+            if (!cerrada) System.err.println("Error atendiendo WS " + idWs + ": " + e.getMessage());
         } finally {
-            if (registered) central.unregisterStation(wsId, this);
-            closeSocket();
+            if (registrada) central.desregistrarEstacion(idWs, this);
+            cerrarSocket();
         }
     }
 
     /** Lee una petición, notifica ACK/NACK de su trama y devuelve DATA. */
-    private String receiveClientFrame() throws IOException {
-        while (!closed && !socket.isClosed()) {
-            int first = in.read();
-            if (first < 0) throw new EOFException("La WS cerró el socket");
-            if (first == WireProtocol.EOT) return null;
-            if (first != WireProtocol.STX) {
-                WireProtocol.sendControl(out, WireProtocol.NACK);
-                System.err.println("WS " + wsId + ": se esperaba STX/EOT; recibido " + first);
+    private String recibirTramaCliente() throws IOException {
+        while (!cerrada && !socket.isClosed()) {
+            int primero = entrada.read();
+            if (primero < 0) throw new EOFException("La WS cerró el socket");
+            if (primero == WireProtocol.EOT) return null;
+            if (primero != WireProtocol.STX) {
+                WireProtocol.enviarControl(salida, WireProtocol.NACK);
+                System.err.println("WS " + idWs + ": se esperaba STX/EOT; recibido " + primero);
                 continue;
             }
             try {
-                String data = WireProtocol.readFrameAfterStx(in);
-                WireProtocol.sendControl(out, WireProtocol.ACK);
-                return data;
+                String datos = WireProtocol.leerTramaTrasStx(entrada);
+                WireProtocol.enviarControl(salida, WireProtocol.ACK);
+                return datos;
             } catch (WireProtocol.BadLrcException e) {
-                WireProtocol.sendControl(out, WireProtocol.NACK);
-                System.err.println("WS " + wsId + ": " + e.getMessage() + "; esperando retransmisión.");
+                WireProtocol.enviarControl(salida, WireProtocol.NACK);
+                System.err.println("WS " + idWs + ": " + e.getMessage() + "; esperando retransmisión.");
             }
         }
         return null;
     }
 
-    private void sendAnswerAndWaitAck(String answer) throws IOException {
-        for (int attempt = 1; attempt <= 3; attempt++) {
-            WireProtocol.sendFrame(out, answer);
-            int confirmation = in.read();
-            if (confirmation == WireProtocol.ACK) return;
-            if (confirmation == WireProtocol.NACK) {
-                System.err.println("WS " + wsId + ": no validó la respuesta de CENTRAL; reintentando (" + attempt + "/3).");
+    private void enviarRespuestaYEsperarAck(String respuesta) throws IOException {
+        for (int intento = 1; intento <= 3; intento++) {
+            WireProtocol.enviarTrama(salida, respuesta);
+            int confirmacion = entrada.read();
+            if (confirmacion == WireProtocol.ACK) return;
+            if (confirmacion == WireProtocol.NACK) {
+                System.err.println("WS " + idWs + ": no validó la respuesta de CENTRAL; reintentando (" + intento + "/3).");
                 continue;
             }
-            if (confirmation < 0) throw new EOFException("La WS cerró antes de confirmar la respuesta");
-            if (confirmation == WireProtocol.EOT) throw new EOFException("La WS terminó la sesión antes de confirmar la respuesta");
-            throw new IOException("Se esperaba ACK/NACK de la respuesta y llegó " + confirmation);
+            if (confirmacion < 0) throw new EOFException("La WS cerró antes de confirmar la respuesta");
+            if (confirmacion == WireProtocol.EOT) throw new EOFException("La WS terminó la sesión antes de confirmar la respuesta");
+            throw new IOException("Se esperaba ACK/NACK de la respuesta y llegó " + confirmacion);
         }
         throw new IOException("La WS rechazó tres veces una respuesta de CENTRAL");
     }
 
-    private static String appendCommands(String answer, List<String> commands) {
-        if (commands == null || commands.isEmpty()) return answer;
-        StringBuilder sb = new StringBuilder(answer == null ? "" : answer);
-        for (String command : commands) sb.append("#CMD#").append(command);
+    private static String adjuntarComandos(String respuesta, List<String> comandos) {
+        if (comandos == null || comandos.isEmpty()) return respuesta;
+        StringBuilder sb = new StringBuilder(respuesta == null ? "" : respuesta);
+        for (String comando : comandos) sb.append("#CMD#").append(comando);
         return sb.toString();
     }
 
-    private String processHello(String message) {
-        String[] h = message.split("#", -1);
+    private String procesarSaludo(String mensaje) {
+        String[] h = mensaje.split("#", -1);
         if (h.length != 4 || !"HELLO".equals(h[0])) {
             return "HELLO_OK#KO#Se esperaba HELLO#id#ubicacion_codificada#caudal";
         }
-        wsId = parseInt(h[1], -1);
-        String location;
-        try { location = URLDecoder.decode(h[2], StandardCharsets.UTF_8.name()); }
-        catch (Exception e) { location = h[2]; }
-        double nominalFlow = parseDouble(h[3], -1);
-        if (wsId <= 0 || location.trim().isEmpty() || nominalFlow <= 0) {
+        idWs = entero(h[1], -1);
+        String ubicacion;
+        try { ubicacion = URLDecoder.decode(h[2], StandardCharsets.UTF_8.name()); }
+        catch (Exception e) { ubicacion = h[2]; }
+        double caudalNominal = decimal(h[3], -1);
+        if (idWs <= 0 || ubicacion.trim().isEmpty() || caudalNominal <= 0) {
             return "HELLO_OK#KO#ID, ubicación o caudal inválidos";
         }
-        if (!central.puedeRegistrar(wsId)) {
+        if (!central.puedeRegistrar(idWs)) {
             return "HELLO_OK#KO#WS no registrada en CENTRAL";
         }
-        if (!central.registerStation(wsId, location, nominalFlow, this)) {
+        if (!central.registrarEstacion(idWs, ubicacion, caudalNominal, this)) {
             return "HELLO_OK#KO#No se pudo registrar la estación en SQLite";
         }
-        registered = true;
-        return "HELLO_OK#OK#WS_" + wsId + "_REGISTRADA";
+        registrada = true;
+        return "HELLO_OK#OK#WS_" + idWs + "_REGISTRADA";
     }
 
-    private String processMessage(String message) {
-        String[] p = message.split("#", -1);
+    private String procesarMensaje(String mensaje) {
+        String[] p = mensaje.split("#", -1);
         if (p.length == 7 && "STATUS".equals(p[0])) {
-            String state = p[1];
-            double flow = parseDouble(p[2], -1);
-            double volume = parseDouble(p[3], -1);
-            long elapsed = parseLong(p[4], -1);
-            String requestId = p[5];
-            int operatorId = parseInt(p[6], 0);
-            if (flow < 0 || volume < 0 || elapsed < 0) return "ACK#STATUS#KO#TELEMETRIA_INVALIDA";
-            boolean accepted = central.onStationStatus(wsId, state, flow, volume, elapsed, requestId, operatorId, this);
-            return accepted ? "ACK#STATUS#OK" : "ACK#STATUS#KO#ESTADO_INVALIDO_O_SESION_ANTIGUA";
+            String estado = p[1];
+            double caudal = decimal(p[2], -1);
+            double volumen = decimal(p[3], -1);
+            long transcurrido = enteroLargo(p[4], -1);
+            String idSolicitud = p[5];
+            int idOperario = entero(p[6], 0);
+            if (caudal < 0 || volumen < 0 || transcurrido < 0) return "ACK#STATUS#KO#TELEMETRIA_INVALIDA";
+            boolean aceptado = central.alRecibirEstado(idWs, estado, caudal, volumen, transcurrido, idSolicitud, idOperario, this);
+            return aceptado ? "ACK#STATUS#OK" : "ACK#STATUS#KO#ESTADO_INVALIDO_O_SESION_ANTIGUA";
         }
         if (p.length == 1 && "PING".equals(p[0])) return "PONG";
         return "ACK#KO#OPERACION_DESCONOCIDA";
     }
 
-    public boolean isSessionOpen() { return !closed && socket.isConnected() && !socket.isClosed(); }
-    public String remoteAddress() { SocketAddress address = socket.getRemoteSocketAddress(); return String.valueOf(address); }
+    public boolean sesionAbierta() { return !cerrada && socket.isConnected() && !socket.isClosed(); }
+    public String direccionRemota() { SocketAddress direccion = socket.getRemoteSocketAddress(); return String.valueOf(direccion); }
 
-    public void closeFromReplacement() {
-        closed = true;
-        closeSocket();
-    }
-
-    private void closeSocket() {
-        closed = true;
-        try { socket.close(); } catch (IOException ignored) { }
+    public void cerrarDesdeReemplazo() {
+        cerrada = true;
+        cerrarSocket();
     }
 
-    private static int parseInt(String x, int fallback) {
-        try { return Integer.parseInt(x.trim()); } catch (Exception e) { return fallback; }
+    private void cerrarSocket() {
+        cerrada = true;
+        try { socket.close(); } catch (IOException ignorada) { }
     }
-    private static long parseLong(String x, long fallback) {
-        try { return Long.parseLong(x.trim()); } catch (Exception e) { return fallback; }
+
+    private static int entero(String x, int porDefecto) {
+        try { return Integer.parseInt(x.trim()); } catch (Exception e) { return porDefecto; }
     }
-    private static double parseDouble(String x, double fallback) {
-        try { double value = Double.parseDouble(x.trim()); return Double.isFinite(value) ? value : fallback; }
-        catch (Exception e) { return fallback; }
+    private static long enteroLargo(String x, long porDefecto) {
+        try { return Long.parseLong(x.trim()); } catch (Exception e) { return porDefecto; }
+    }
+    private static double decimal(String x, double porDefecto) {
+        try { double valor = Double.parseDouble(x.trim()); return Double.isFinite(valor) ? valor : porDefecto; }
+        catch (Exception e) { return porDefecto; }
     }
 }

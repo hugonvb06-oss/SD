@@ -23,6 +23,7 @@ import javax.swing.SwingUtilities;
  * - espera de una conclusión real publicada por WM_Central;
  * - pausa de 4 segundos entre servicios del fichero;
  * - consulta de WS disponibles;
+ * - recuperación de servicios pendientes tras cerrarse durante un riego;
  * - correlación de respuestas, timeout y cierre controlado.
  *
  * El contrato de mensajes Kafka se documenta en ../README.md y debe ser respetado
@@ -30,39 +31,40 @@ import javax.swing.SwingUtilities;
  */
 public final class WM_FO implements AutoCloseable {
 
-    private static final int MAX_DURATION_SECONDS = 86400;
-    private static final long DEFAULT_LIST_TIMEOUT_SECONDS = 15;
-    private static final long DEFAULT_MIN_SERVICE_TIMEOUT_SECONDS = 120;
-    private static final long EXTRA_SERVICE_TIMEOUT_SECONDS = 120;
-    private static final long PAUSE_BETWEEN_FILE_SERVICES_MS = 4000;
+    private static final int DURACION_MAXIMA_SEGUNDOS = 86400;
+    private static final long TIMEOUT_LISTADO_SEGUNDOS = 15;
+    private static final long TIMEOUT_MINIMO_SERVICIO_SEGUNDOS = 120;
+    private static final long SEGUNDOS_EXTRA_SERVICIO = 120;
+    private static final long PAUSA_ENTRE_SERVICIOS_MS = 4000;
+    private static final long TIMEOUT_RECUPERACION_SEGUNDOS = 30;
 
     private final String ipBroker;
     private final int puertoBroker;
-    private final int idOperador;
+    private final int idOperario;
     private final Scanner teclado;
 
-    private KafkaOperatorClient kafka;
+    private ClienteKafkaOperario kafka;
     private Boolean ultimoEstadoCentral;
 
-    private WM_FO(String ipBroker, int puertoBroker, int idOperador) {
+    private WM_FO(String ipBroker, int puertoBroker, int idOperario) {
         this.ipBroker = ipBroker;
         this.puertoBroker = puertoBroker;
-        this.idOperador = idOperador;
+        this.idOperario = idOperario;
         this.teclado = new Scanner(System.in);
         crearClienteKafka();
     }
 
     private void crearClienteKafka() {
-        String bootstrapServers = formatearBootstrap(ipBroker, puertoBroker);
-        kafka = new KafkaOperatorClient(bootstrapServers, idOperador);
+        String servidoresKafka = formatearBootstrap(ipBroker, puertoBroker);
+        kafka = new ClienteKafkaOperario(servidoresKafka, idOperario);
     }
 
-    private static String formatearBootstrap(String host, int port) {
+    private static String formatearBootstrap(String anfitrion, int puerto) {
         // Kafka espera host:puerto. Los IPv6 literales deben ir entre corchetes.
-        if (host.contains(":") && !host.startsWith("[")) {
-            return "[" + host + "]:" + port;
+        if (anfitrion.contains(":") && !anfitrion.startsWith("[")) {
+            return "[" + anfitrion + "]:" + puerto;
         }
-        return host + ":" + port;
+        return anfitrion + ":" + puerto;
     }
 
     public void iniciar() {
@@ -70,6 +72,7 @@ public final class WM_FO implements AutoCloseable {
         if (!conectarKafkaConReintentos()) {
             return;
         }
+        recuperarServiciosPendientes();
 
         boolean salir = false;
         while (!salir) {
@@ -99,7 +102,7 @@ public final class WM_FO implements AutoCloseable {
         System.out.println("========================================");
         System.out.println("           WM_FO - OPERARIO");
         System.out.println("========================================");
-        System.out.println("ID Operario: " + idOperador);
+        System.out.println("ID Operario: " + idOperario);
         System.out.println("Broker Kafka: " + formatearBootstrap(ipBroker, puertoBroker));
     }
 
@@ -107,7 +110,7 @@ public final class WM_FO implements AutoCloseable {
         while (true) {
             try {
                 System.out.println("Conectando con Kafka...");
-                kafka.start();
+                kafka.iniciar();
                 return true;
             } catch (Exception e) {
                 System.err.println("No se pudo iniciar la comunicación Kafka: " + e.getMessage());
@@ -118,11 +121,61 @@ public final class WM_FO implements AutoCloseable {
                 }
 
                 try {
-                    kafka.close();
-                } catch (Exception ignored) {
+                    kafka.cerrar();
+                } catch (Exception ignorada) {
                     // No se permite que un error de limpieza oculte el fallo original.
                 }
                 crearClienteKafka();
+            }
+        }
+    }
+
+    /** Recupera el estado de los riegos que quedaron pendientes de una ejecución anterior. */
+    private void recuperarServiciosPendientes() {
+        List<ClienteKafkaOperario.Pendiente> pendientes = kafka.cargarPendientes();
+        if (pendientes.isEmpty()) {
+            return;
+        }
+        System.out.println("Se han encontrado " + pendientes.size()
+                + " servicios pendientes de sesiones anteriores. Consultando su estado...");
+        for (ClienteKafkaOperario.Pendiente pendiente : pendientes) {
+            try {
+                kafka.solicitarEstado(pendiente.idSolicitud);
+            } catch (Exception e) {
+                System.err.println("No se pudo preguntar por " + pendiente.idSolicitud + ": " + e.getMessage());
+                continue;
+            }
+            try {
+                long limite = System.nanoTime()
+                        + Duration.ofSeconds(TIMEOUT_RECUPERACION_SEGUNDOS).toNanos();
+                boolean resuelto = false;
+                while (System.nanoTime() < limite) {
+                    long restante = limite - System.nanoTime();
+                    Map<String, Object> evento = kafka.esperarEvento(pendiente.idSolicitud,
+                            Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
+                    if (evento == null) {
+                        continue;
+                    }
+                    System.out.print("[RECUPERADO] ");
+                    mostrarNotificacion(evento);
+                    String estado = texto(evento.get("status"));
+                    if (esEstadoExito(estado) || esEstadoFracaso(estado)) {
+                        kafka.resolverPendiente(pendiente.idSolicitud);
+                        resuelto = true;
+                        break;
+                    }
+                }
+                if (!resuelto) {
+                    System.err.println("No se conoce aún la conclusión de " + pendiente.idSolicitud
+                            + "; seguirá pendiente para la próxima ejecución.");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                System.err.println("Recuperación de " + pendiente.idSolicitud + " interrumpida.");
+            } catch (IOException | IllegalStateException e) {
+                System.err.println("No se pudo recuperar " + pendiente.idSolicitud + ": " + e.getMessage());
+            } finally {
+                kafka.finalizarSolicitud(pendiente.idSolicitud);
             }
         }
     }
@@ -141,7 +194,7 @@ public final class WM_FO implements AutoCloseable {
     /** Avisa al operario cuando WM_Central deja de publicar latidos o se recupera. */
     private void avisarCentral() {
         if (kafka == null) return;
-        boolean vivo = kafka.isCentralAlive();
+        boolean vivo = kafka.centralViva();
         if (ultimoEstadoCentral == null) {
             ultimoEstadoCentral = vivo;
             if (!vivo) {
@@ -160,9 +213,9 @@ public final class WM_FO implements AutoCloseable {
     private void solicitarServicioManual() {
         System.out.println();
         System.out.println("===== SOLICITUD DE RIEGO =====");
-        int wsId = leerEnteroPositivo("ID de la estación (WS): ", Integer.MAX_VALUE);
-        int duracion = leerEnteroPositivo("Duración del riego en segundos (1-86400): ", MAX_DURATION_SECONDS);
-        ejecutarServicio(wsId, duracion, "Solicitud manual");
+        int idWs = leerEnteroPositivo("ID de la estación (WS): ", Integer.MAX_VALUE);
+        int duracion = leerEnteroPositivo("Duración del riego en segundos (1-86400): ", DURACION_MAXIMA_SEGUNDOS);
+        ejecutarServicio(idWs, duracion, "Solicitud manual");
     }
 
     private void solicitarServiciosDesdeFichero() {
@@ -192,10 +245,10 @@ public final class WM_FO implements AutoCloseable {
             Servicio servicio = servicios.get(i);
             System.out.println();
             System.out.println("========== SERVICIO " + (i + 1) + "/" + servicios.size() + " ==========");
-            System.out.println("Fichero, línea " + servicio.linea + ": WS=" + servicio.wsId
+            System.out.println("Fichero, línea " + servicio.linea + ": WS=" + servicio.idWs
                     + ", duración=" + servicio.duracionSegundos + " s");
 
-            Resultado resultado = ejecutarServicio(servicio.wsId, servicio.duracionSegundos,
+            Resultado resultado = ejecutarServicio(servicio.idWs, servicio.duracionSegundos,
                     "Servicio de fichero, línea " + servicio.linea);
 
             if (resultado == Resultado.DESCONOCIDO) {
@@ -207,7 +260,7 @@ public final class WM_FO implements AutoCloseable {
             if (i < servicios.size() - 1) {
                 System.out.println("Esperando 4 segundos antes del siguiente servicio...");
                 try {
-                    Thread.sleep(PAUSE_BETWEEN_FILE_SERVICES_MS);
+                    Thread.sleep(PAUSA_ENTRE_SERVICIOS_MS);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     System.out.println("Procesamiento del fichero interrumpido; no se enviarán más servicios.");
@@ -242,35 +295,35 @@ public final class WM_FO implements AutoCloseable {
                             + ": se esperaba el formato wsId;duracionSegundos.");
                 }
 
-                int wsId;
+                int idWs;
                 int duracion;
                 try {
-                    wsId = Integer.parseInt(campos[0].trim());
+                    idWs = Integer.parseInt(campos[0].trim());
                     duracion = Integer.parseInt(campos[1].trim());
                 } catch (NumberFormatException e) {
                     throw new IllegalArgumentException("Línea " + numeroLinea
                             + ": el ID de WS y la duración deben ser números enteros.");
                 }
 
-                if (wsId <= 0) {
+                if (idWs <= 0) {
                     throw new IllegalArgumentException("Línea " + numeroLinea + ": el ID de WS debe ser positivo.");
                 }
-                if (duracion <= 0 || duracion > MAX_DURATION_SECONDS) {
+                if (duracion <= 0 || duracion > DURACION_MAXIMA_SEGUNDOS) {
                     throw new IllegalArgumentException("Línea " + numeroLinea
-                            + ": la duración debe estar entre 1 y " + MAX_DURATION_SECONDS + " segundos.");
+                            + ": la duración debe estar entre 1 y " + DURACION_MAXIMA_SEGUNDOS + " segundos.");
                 }
-                servicios.add(new Servicio(wsId, duracion, numeroLinea));
+                servicios.add(new Servicio(idWs, duracion, numeroLinea));
             }
         }
         return servicios;
     }
 
-    private Resultado ejecutarServicio(int wsId, int duracionSegundos, String origen) {
-        String requestId;
+    private Resultado ejecutarServicio(int idWs, int duracionSegundos, String origen) {
+        String idSolicitud;
         try {
-            System.out.println(origen + ". Operario=" + idOperador + ", WS=" + wsId
+            System.out.println(origen + ". Operario=" + idOperario + ", WS=" + idWs
                     + ", duración=" + duracionSegundos + " s");
-            requestId = kafka.solicitarRiego(wsId, duracionSegundos);
+            idSolicitud = kafka.solicitarRiego(idWs, duracionSegundos);
         } catch (Exception e) {
             System.err.println("No se pudo publicar la solicitud: " + e.getMessage());
             System.err.println("No se puede confirmar si CENTRAL recibió la petición. Comprueba el estado "
@@ -280,12 +333,12 @@ public final class WM_FO implements AutoCloseable {
 
         try {
             long timeout = obtenerTimeoutServicio(duracionSegundos);
-            System.out.println("Esperando la conclusión de CENTRAL. Request ID: " + requestId);
-            long deadline = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
+            System.out.println("Esperando la conclusión de CENTRAL. Request ID: " + idSolicitud);
+            long limite = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
 
             while (true) {
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
+                long restante = limite - System.nanoTime();
+                if (restante <= 0) {
                     System.err.println("Timeout: han pasado " + timeout
                             + " segundos sin recibir una conclusión del servicio.");
                     System.err.println("Esto no cancela el riego en CENTRAL/WS; el resultado es desconocido.");
@@ -293,8 +346,8 @@ public final class WM_FO implements AutoCloseable {
                     return Resultado.DESCONOCIDO;
                 }
 
-                Map<String, Object> evento = kafka.esperarEvento(requestId,
-                        Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
+                Map<String, Object> evento = kafka.esperarEvento(idSolicitud,
+                        Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
                 avisarCentral();
                 if (evento == null) {
                     continue;
@@ -304,10 +357,12 @@ public final class WM_FO implements AutoCloseable {
                 String estado = texto(evento.get("status"));
                 if (esEstadoExito(estado)) {
                     System.out.println("Riego finalizado correctamente.");
+                    kafka.resolverPendiente(idSolicitud);
                     return Resultado.EXITO;
                 }
                 if (esEstadoFracaso(estado)) {
                     System.out.println("El servicio ha concluido sin éxito (" + estado + ").");
+                    kafka.resolverPendiente(idSolicitud);
                     return Resultado.FRACASO;
                 }
             }
@@ -319,13 +374,13 @@ public final class WM_FO implements AutoCloseable {
             System.err.println("Se ha perdido la capacidad de recibir el resultado: " + e.getMessage());
             return Resultado.DESCONOCIDO;
         } finally {
-            kafka.finalizarSolicitud(requestId);
+            kafka.finalizarSolicitud(idSolicitud);
         }
     }
 
     private long obtenerTimeoutServicio(int duracionSegundos) {
-        long porDefecto = Math.max(DEFAULT_MIN_SERVICE_TIMEOUT_SECONDS,
-                (long) duracionSegundos + EXTRA_SERVICE_TIMEOUT_SECONDS);
+        long porDefecto = Math.max(TIMEOUT_MINIMO_SERVICIO_SEGUNDOS,
+                (long) duracionSegundos + SEGUNDOS_EXTRA_SERVICIO);
         String variable = System.getenv("WM_FO_TIMEOUT_SECONDS");
         if (variable == null || variable.trim().isEmpty()) {
             return porDefecto;
@@ -379,9 +434,9 @@ public final class WM_FO implements AutoCloseable {
     }
 
     private void mostrarWsDisponibles() {
-        String requestId;
+        String idSolicitud;
         try {
-            requestId = kafka.solicitarListadoWsDisponibles();
+            idSolicitud = kafka.solicitarListadoWsDisponibles();
         } catch (Exception e) {
             System.err.println("No se pudo solicitar el listado a CENTRAL: " + e.getMessage());
             return;
@@ -389,11 +444,11 @@ public final class WM_FO implements AutoCloseable {
 
         try {
             System.out.println("Consultando las estaciones disponibles...");
-            long deadline = System.nanoTime() + Duration.ofSeconds(DEFAULT_LIST_TIMEOUT_SECONDS).toNanos();
-            while (System.nanoTime() < deadline) {
-                long remaining = deadline - System.nanoTime();
-                Map<String, Object> evento = kafka.esperarEvento(requestId,
-                        Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
+            long limite = System.nanoTime() + Duration.ofSeconds(TIMEOUT_LISTADO_SEGUNDOS).toNanos();
+            while (System.nanoTime() < limite) {
+                long restante = limite - System.nanoTime();
+                Map<String, Object> evento = kafka.esperarEvento(idSolicitud,
+                        Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
                 avisarCentral();
                 if (evento == null) {
                     continue;
@@ -412,14 +467,14 @@ public final class WM_FO implements AutoCloseable {
                     return;
                 }
             }
-            System.err.println("CENTRAL no respondió al listado en " + DEFAULT_LIST_TIMEOUT_SECONDS + " segundos.");
+            System.err.println("CENTRAL no respondió al listado en " + TIMEOUT_LISTADO_SEGUNDOS + " segundos.");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             System.err.println("Consulta de WS interrumpida.");
         } catch (IOException | IllegalStateException e) {
             System.err.println("No se pudo recibir el listado: " + e.getMessage());
         } finally {
-            kafka.finalizarSolicitud(requestId);
+            kafka.finalizarSolicitud(idSolicitud);
         }
     }
 
@@ -443,15 +498,15 @@ public final class WM_FO implements AutoCloseable {
             }
             Map<?, ?> estacion = (Map<?, ?>) elemento;
             String estado = texto(estacion.get("state"));
-            Object availableValue = estacion.get("available");
-            boolean disponible = Boolean.TRUE.equals(availableValue)
+            Object valorAvailable = estacion.get("available");
+            boolean disponible = Boolean.TRUE.equals(valorAvailable)
                     || "ACTIVADA".equalsIgnoreCase(estado)
                     || "AVAILABLE".equalsIgnoreCase(estado);
             // La respuesta de esta consulta debe incluir únicamente estaciones disponibles.
-            if (availableValue != null && !Boolean.TRUE.equals(availableValue)) {
+            if (valorAvailable != null && !Boolean.TRUE.equals(valorAvailable)) {
                 continue;
             }
-            if (availableValue == null && estado != null && !disponible) {
+            if (valorAvailable == null && estado != null && !disponible) {
                 continue;
             }
 
@@ -479,7 +534,7 @@ public final class WM_FO implements AutoCloseable {
                 if (valor > 0 && valor <= maximo) {
                     return valor;
                 }
-            } catch (NumberFormatException ignored) {
+            } catch (NumberFormatException ignorada) {
                 // Se vuelve a solicitar el dato sin terminar la aplicación.
             }
             System.out.println("Introduce un número entero entre 1 y " + maximo + ".");
@@ -525,18 +580,18 @@ public final class WM_FO implements AutoCloseable {
     @Override
     public void close() {
         if (kafka != null) {
-            kafka.close();
+            kafka.cerrar();
         }
     }
 
     public static void main(String[] args) {
         String ipBroker;
         int puertoBroker;
-        int idOperador;
+        int idOperario;
         try {
             ipBroker = (args.length >= 1 ? args[0] : env("WM_KAFKA_HOST", "localhost")).trim();
             puertoBroker = Integer.parseInt((args.length >= 2 ? args[1] : env("WM_KAFKA_PORT", "9092")).trim());
-            idOperador = Integer.parseInt((args.length >= 3 ? args[2] : env("WM_FO_ID", "1")).trim());
+            idOperario = Integer.parseInt((args.length >= 3 ? args[2] : env("WM_FO_ID", "1")).trim());
         } catch (NumberFormatException e) {
             System.err.println("El puerto del broker y el ID del operario deben ser números enteros.");
             System.err.println("Uso: java WM_FO [IP_BROKER] [PUERTO_BROKER] [ID_OPERARIO]");
@@ -544,30 +599,30 @@ public final class WM_FO implements AutoCloseable {
             return;
         }
 
-        if (ipBroker.isEmpty() || puertoBroker < 1 || puertoBroker > 65535 || idOperador <= 0) {
+        if (ipBroker.isEmpty() || puertoBroker < 1 || puertoBroker > 65535 || idOperario <= 0) {
             System.err.println("Argumentos inválidos. La IP no puede estar vacía, el puerto debe estar entre 1 y 65535 y el ID debe ser positivo.");
             return;
         }
 
-        final String brokerHost = ipBroker;
-        final int brokerPort = puertoBroker;
-        final int operator = idOperador;
+        final String anfitrionBroker = ipBroker;
+        final int puertoBrokerFinal = puertoBroker;
+        final int operario = idOperario;
         if (UiSupport.guiEnabled()) {
-            final boolean[] shown = {false};
+            final boolean[] mostrada = {false};
             try {
                 SwingUtilities.invokeAndWait(() -> {
-                    FOFrame frame = new FOFrame(brokerHost, brokerPort, operator);
-                    frame.setVisible(true);
-                    shown[0] = true;
+                    FOFrame ventana = new FOFrame(anfitrionBroker, puertoBrokerFinal, operario);
+                    ventana.setVisible(true);
+                    mostrada[0] = true;
                 });
             } catch (Throwable t) {
                 System.err.println("No se pudo iniciar la interfaz gráfica de WM_FO: "
                         + t.getMessage() + ". Se usará la consola.");
             }
-            if (shown[0]) return;
+            if (mostrada[0]) return;
         }
 
-        try (WM_FO operador = new WM_FO(ipBroker, puertoBroker, idOperador)) {
+        try (WM_FO operador = new WM_FO(ipBroker, puertoBroker, idOperario)) {
             operador.iniciar();
         } catch (Exception e) {
             System.err.println("WM_FO se ha cerrado por un error: " + e.getMessage());
@@ -586,12 +641,12 @@ public final class WM_FO implements AutoCloseable {
     }
 
     private static final class Servicio {
-        private final int wsId;
+        private final int idWs;
         private final int duracionSegundos;
         private final int linea;
 
-        private Servicio(int wsId, int duracionSegundos, int linea) {
-            this.wsId = wsId;
+        private Servicio(int idWs, int duracionSegundos, int linea) {
+            this.idWs = idWs;
             this.duracionSegundos = duracionSegundos;
             this.linea = linea;
         }

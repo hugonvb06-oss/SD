@@ -48,714 +48,758 @@ import java.util.Map;
  *
  * Permite solicitar un riego manual, procesar un fichero de servicios de forma
  * secuencial y consultar las WS disponibles, mostrando el resultado de CENTRAL y
- * avisando cuando dejan de llegar los latidos de la central.
+ * avisando cuando dejan de llegar los latidos de la central. Al arrancar recupera
+ * el estado de los riegos que quedaron pendientes de una sesión anterior.
  */
 final class FOFrame extends JFrame {
 
-    private static final long PAUSE_BETWEEN_FILE_SERVICES_MS = 4000L;
-    private static final long DEFAULT_LIST_TIMEOUT_SECONDS = 15L;
-    private static final long DEFAULT_MIN_SERVICE_TIMEOUT_SECONDS = 120L;
-    private static final long EXTRA_SERVICE_TIMEOUT_SECONDS = 120L;
+    private static final long PAUSA_ENTRE_SERVICIOS_MS = 4000L;
+    private static final long TIMEOUT_LISTADO_SEGUNDOS = 15L;
+    private static final long TIMEOUT_MINIMO_SERVICIO_SEGUNDOS = 120L;
+    private static final long SEGUNDOS_EXTRA_SERVICIO = 120L;
+    private static final long TIMEOUT_RECUPERACION_SEGUNDOS = 30L;
 
-    private static final Color BACKGROUND = new Color(0x1E1E1E);
-    private static final Color PANEL_BACKGROUND = new Color(0x252526);
-    private static final Color TEXT = new Color(0xF2F2F2);
-    private static final Color MUTED = new Color(0xBBBBBB);
-    private static final Color GREEN = new Color(0x66BB6A);
-    private static final Color RED = new Color(0xEF5350);
-    private static final Color ORANGE = new Color(0xFFA726);
+    private static final Color FONDO = new Color(0x1E1E1E);
+    private static final Color FONDO_PANEL = new Color(0x252526);
+    private static final Color TEXTO = new Color(0xF2F2F2);
+    private static final Color ATENUADO = new Color(0xBBBBBB);
+    private static final Color VERDE = new Color(0x66BB6A);
+    private static final Color ROJO = new Color(0xEF5350);
+    private static final Color NARANJA = new Color(0xFFA726);
 
     private final String ipBroker;
     private final int puertoBroker;
-    private final int operatorId;
+    private final int idOperario;
 
-    private volatile KafkaOperatorClient kafka;
-    private volatile boolean connected;
-    private volatile boolean busy;
-    private volatile boolean connecting;
-    private volatile boolean closing;
+    private volatile ClienteKafkaOperario kafka;
+    private volatile boolean conectado;
+    private volatile boolean ocupado;
+    private volatile boolean conectando;
+    private volatile boolean cerrando;
 
-    private final JLabel kafkaBadge = new JLabel("Kafka: desconectado");
-    private final JLabel centralBadge = new JLabel("Central: sin conexión");
-    private final JTextArea logArea = new JTextArea(10, 80);
-    private final DefaultTableModel stationsModel = new DefaultTableModel(
+    private final JLabel etiquetaKafka = new JLabel("Kafka: desconectado");
+    private final JLabel etiquetaCentral = new JLabel("Central: sin conexión");
+    private final JTextArea areaRegistro = new JTextArea(10, 80);
+    private final DefaultTableModel modeloEstaciones = new DefaultTableModel(
             new Object[]{"ID WS", "Ubicación", "Estado"}, 0) {
-        @Override public boolean isCellEditable(int row, int column) { return false; }
+        @Override public boolean isCellEditable(int fila, int columna) { return false; }
     };
 
-    private final JSpinner wsSpinner = new JSpinner(new SpinnerNumberModel(1, 1, Integer.MAX_VALUE, 1));
-    private final JSpinner durationSpinner = new JSpinner(new SpinnerNumberModel(10, 1, 86400, 1));
-    private final JTextField fileField = new JTextField();
-    private final JButton manualButton = new JButton("Solicitar riego");
-    private final JButton fileButton = new JButton("Procesar fichero");
-    private final JButton listButton = new JButton("Consultar WS disponibles");
-    private final JButton reconnectButton = new JButton("Reconectar");
+    private final JSpinner selectorWs = new JSpinner(new SpinnerNumberModel(1, 1, Integer.MAX_VALUE, 1));
+    private final JSpinner selectorDuracion = new JSpinner(new SpinnerNumberModel(10, 1, 86400, 1));
+    private final JTextField campoFichero = new JTextField();
+    private final JButton botonManual = new JButton("Solicitar riego");
+    private final JButton botonFichero = new JButton("Procesar fichero");
+    private final JButton botonListado = new JButton("Consultar WS disponibles");
+    private final JButton botonReconectar = new JButton("Reconectar");
 
-    FOFrame(String ipBroker, int puertoBroker, int operatorId) {
-        super("WM_FO - Operario " + operatorId);
+    FOFrame(String ipBroker, int puertoBroker, int idOperario) {
+        super("WM_FO - Operario " + idOperario);
         this.ipBroker = ipBroker;
         this.puertoBroker = puertoBroker;
-        this.operatorId = operatorId;
+        this.idOperario = idOperario;
 
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         addWindowListener(new WindowAdapter() {
             @Override public void windowClosing(WindowEvent e) {
-                closeClient();
+                cerrarCliente();
                 dispose();
                 System.exit(0);
             }
         });
 
-        getContentPane().setBackground(BACKGROUND);
+        getContentPane().setBackground(FONDO);
         setLayout(new BorderLayout());
-        add(header(), BorderLayout.NORTH);
-        add(tabs(), BorderLayout.CENTER);
-        add(southPanel(), BorderLayout.SOUTH);
+        add(cabecera(), BorderLayout.NORTH);
+        add(pestanas(), BorderLayout.CENTER);
+        add(panelSur(), BorderLayout.SOUTH);
 
-        manualButton.addActionListener(e -> requestManual());
-        fileButton.addActionListener(e -> processFile());
-        listButton.addActionListener(e -> listAvailable());
-        reconnectButton.addActionListener(e -> connect());
+        botonManual.addActionListener(e -> solicitarManual());
+        botonFichero.addActionListener(e -> procesarFichero());
+        botonListado.addActionListener(e -> consultarDisponibles());
+        botonReconectar.addActionListener(e -> conectar());
 
-        Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
-        setSize(Math.min(1000, Math.max(760, screen.width - 60)),
-                Math.min(720, Math.max(500, screen.height - 60)));
+        Rectangle pantalla = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        setSize(Math.min(1000, Math.max(760, pantalla.width - 60)),
+                Math.min(720, Math.max(500, pantalla.height - 60)));
         setMinimumSize(new Dimension(720, 480));
         setLocationRelativeTo(null);
 
-        updateControls();
-        connect();
-        new Timer(1000, e -> updateCentralStatus()).start();
+        actualizarControles();
+        conectar();
+        new Timer(1000, e -> actualizarEstadoCentral()).start();
     }
 
     // ------------------------------------------------------------------ Layout
 
-    private JComponent header() {
+    private JComponent cabecera() {
         JPanel panel = new JPanel(new BorderLayout(16, 0));
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(12, 18, 12, 18));
 
-        JLabel title = new JLabel("WM_FO - Operario de campo");
-        title.setFont(new Font("SansSerif", Font.BOLD, 22));
-        title.setForeground(TEXT);
+        JLabel titulo = new JLabel("WM_FO - Operario de campo");
+        titulo.setFont(new Font("SansSerif", Font.BOLD, 22));
+        titulo.setForeground(TEXTO);
 
-        JLabel subtitle = new JLabel("Operario " + operatorId + "  ·  Kafka "
-                + formatBootstrap(ipBroker, puertoBroker));
-        subtitle.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        subtitle.setForeground(MUTED);
+        JLabel subtitulo = new JLabel("Operario " + idOperario + "  ·  Kafka "
+                + formatearBootstrap(ipBroker, puertoBroker));
+        subtitulo.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        subtitulo.setForeground(ATENUADO);
 
-        JPanel left = new JPanel();
-        left.setOpaque(false);
-        left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
-        left.add(title);
-        left.add(Box.createVerticalStrut(3));
-        left.add(subtitle);
+        JPanel izquierda = new JPanel();
+        izquierda.setOpaque(false);
+        izquierda.setLayout(new BoxLayout(izquierda, BoxLayout.Y_AXIS));
+        izquierda.add(titulo);
+        izquierda.add(Box.createVerticalStrut(3));
+        izquierda.add(subtitulo);
 
-        kafkaBadge.setFont(new Font("SansSerif", Font.BOLD, 12));
-        kafkaBadge.setForeground(MUTED);
-        centralBadge.setFont(new Font("SansSerif", Font.BOLD, 12));
-        centralBadge.setForeground(MUTED);
-        reconnectButton.setEnabled(false);
+        etiquetaKafka.setFont(new Font("SansSerif", Font.BOLD, 12));
+        etiquetaKafka.setForeground(ATENUADO);
+        etiquetaCentral.setFont(new Font("SansSerif", Font.BOLD, 12));
+        etiquetaCentral.setForeground(ATENUADO);
+        botonReconectar.setEnabled(false);
 
-        JPanel badges = new JPanel();
-        badges.setOpaque(false);
-        badges.setLayout(new BoxLayout(badges, BoxLayout.Y_AXIS));
-        kafkaBadge.setAlignmentX(Component.RIGHT_ALIGNMENT);
-        centralBadge.setAlignmentX(Component.RIGHT_ALIGNMENT);
-        reconnectButton.setAlignmentX(Component.RIGHT_ALIGNMENT);
-        badges.add(kafkaBadge);
-        badges.add(Box.createVerticalStrut(3));
-        badges.add(centralBadge);
-        badges.add(Box.createVerticalStrut(5));
-        badges.add(reconnectButton);
+        JPanel distintivos = new JPanel();
+        distintivos.setOpaque(false);
+        distintivos.setLayout(new BoxLayout(distintivos, BoxLayout.Y_AXIS));
+        etiquetaKafka.setAlignmentX(Component.RIGHT_ALIGNMENT);
+        etiquetaCentral.setAlignmentX(Component.RIGHT_ALIGNMENT);
+        botonReconectar.setAlignmentX(Component.RIGHT_ALIGNMENT);
+        distintivos.add(etiquetaKafka);
+        distintivos.add(Box.createVerticalStrut(3));
+        distintivos.add(etiquetaCentral);
+        distintivos.add(Box.createVerticalStrut(5));
+        distintivos.add(botonReconectar);
 
-        panel.add(left, BorderLayout.WEST);
-        panel.add(badges, BorderLayout.EAST);
+        panel.add(izquierda, BorderLayout.WEST);
+        panel.add(distintivos, BorderLayout.EAST);
         return panel;
     }
 
-    private JComponent tabs() {
-        JTabbedPane tabs = new JTabbedPane();
-        tabs.addTab("Riego manual", manualTab());
-        tabs.addTab("Servicios desde fichero", fileTab());
-        tabs.addTab("WS disponibles", availableTab());
-        return tabs;
+    private JComponent pestanas() {
+        JTabbedPane pestanas = new JTabbedPane();
+        pestanas.addTab("Riego manual", pestanaManual());
+        pestanas.addTab("Servicios desde fichero", pestanaFichero());
+        pestanas.addTab("WS disponibles", pestanaDisponibles());
+        return pestanas;
     }
 
-    private JComponent manualTab() {
+    private JComponent pestanaManual() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBackground(BACKGROUND);
+        panel.setBackground(FONDO);
         panel.setBorder(new EmptyBorder(18, 18, 18, 18));
 
-        panel.add(row(label("Estación (WS):"), wsSpinner));
-        panel.add(row(label("Duración del riego (s):"), durationSpinner));
+        panel.add(fila(etiqueta("Estación (WS):"), selectorWs));
+        panel.add(fila(etiqueta("Duración del riego (s):"), selectorDuracion));
         panel.add(Box.createVerticalStrut(6));
-        panel.add(note("La solicitud se envía a CENTRAL por Kafka. La ventana mostrará los "
+        panel.add(nota("La solicitud se envía a CENTRAL por Kafka. La ventana mostrará los "
                 + "eventos RECEIVED, CHECKING, AUTHORIZED, STARTED, PROGRESS y COMPLETED."));
         panel.add(Box.createVerticalStrut(10));
-        panel.add(leftRow(manualButton));
+        panel.add(filaIzquierda(botonManual));
         return panel;
     }
 
-    private JComponent fileTab() {
+    private JComponent pestanaFichero() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBackground(BACKGROUND);
+        panel.setBackground(FONDO);
         panel.setBorder(new EmptyBorder(18, 18, 18, 18));
 
-        fileField.setPreferredSize(new Dimension(430, 26));
-        JButton browse = new JButton("Examinar...");
-        browse.addActionListener(e -> chooseFile());
-        panel.add(row(label("Fichero:"), fileField, browse));
+        campoFichero.setPreferredSize(new Dimension(430, 26));
+        JButton examinar = new JButton("Examinar...");
+        examinar.addActionListener(e -> elegirFichero());
+        panel.add(fila(etiqueta("Fichero:"), campoFichero, examinar));
         panel.add(Box.createVerticalStrut(6));
-        panel.add(note("Formato: una línea por servicio con wsId;duraciónSegundos. "
+        panel.add(nota("Formato: una línea por servicio con wsId;duraciónSegundos. "
                 + "Se admiten líneas vacías y comentarios que empiecen por #. "
                 + "Los servicios se envían en orden con una pausa de 4 segundos."));
         panel.add(Box.createVerticalStrut(10));
-        panel.add(leftRow(fileButton));
+        panel.add(filaIzquierda(botonFichero));
         return panel;
     }
 
-    private JComponent availableTab() {
+    private JComponent pestanaDisponibles() {
         JPanel panel = new JPanel(new BorderLayout(0, 10));
-        panel.setBackground(BACKGROUND);
+        panel.setBackground(FONDO);
         panel.setBorder(new EmptyBorder(18, 18, 18, 18));
 
-        JTable table = new JTable(stationsModel);
-        table.setRowHeight(24);
-        JScrollPane scroll = new JScrollPane(table);
-        scroll.getViewport().setBackground(Color.WHITE);
+        JTable tabla = new JTable(modeloEstaciones);
+        tabla.setRowHeight(24);
+        JScrollPane desplazamiento = new JScrollPane(tabla);
+        desplazamiento.getViewport().setBackground(Color.WHITE);
 
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        top.setOpaque(false);
-        top.add(listButton);
+        JPanel superior = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        superior.setOpaque(false);
+        superior.add(botonListado);
 
-        panel.add(top, BorderLayout.NORTH);
-        panel.add(scroll, BorderLayout.CENTER);
+        panel.add(superior, BorderLayout.NORTH);
+        panel.add(desplazamiento, BorderLayout.CENTER);
         return panel;
     }
 
-    private JComponent southPanel() {
-        JPanel south = new JPanel(new BorderLayout(0, 4));
-        south.setBackground(PANEL_BACKGROUND);
-        south.setBorder(new EmptyBorder(6, 10, 6, 10));
+    private JComponent panelSur() {
+        JPanel sur = new JPanel(new BorderLayout(0, 4));
+        sur.setBackground(FONDO_PANEL);
+        sur.setBorder(new EmptyBorder(6, 10, 6, 10));
 
-        logArea.setEditable(false);
-        logArea.setBackground(new Color(0x111111));
-        logArea.setForeground(new Color(0xDCDCDC));
-        logArea.setFont(new Font("Consolas", Font.PLAIN, 12));
-        logArea.setLineWrap(true);
-        logArea.setWrapStyleWord(true);
-        JScrollPane scroll = new JScrollPane(logArea);
-        scroll.setPreferredSize(new Dimension(0, 220));
-        scroll.setBorder(BorderFactory.createTitledBorder(
+        areaRegistro.setEditable(false);
+        areaRegistro.setBackground(new Color(0x111111));
+        areaRegistro.setForeground(new Color(0xDCDCDC));
+        areaRegistro.setFont(new Font("Consolas", Font.PLAIN, 12));
+        areaRegistro.setLineWrap(true);
+        areaRegistro.setWrapStyleWord(true);
+        JScrollPane desplazamiento = new JScrollPane(areaRegistro);
+        desplazamiento.setPreferredSize(new Dimension(0, 220));
+        desplazamiento.setBorder(BorderFactory.createTitledBorder(
                 BorderFactory.createLineBorder(new Color(0x505050)), "Registro de eventos",
                 javax.swing.border.TitledBorder.LEFT, javax.swing.border.TitledBorder.TOP,
-                new Font("SansSerif", Font.BOLD, 12), TEXT));
+                new Font("SansSerif", Font.BOLD, 12), TEXTO));
 
-        JLabel hint = new JLabel("Consejo: mantén abierta esta ventana para no perder eventos de CENTRAL.");
-        hint.setForeground(MUTED);
-        hint.setFont(new Font("SansSerif", Font.PLAIN, 11));
+        JLabel sugerencia = new JLabel("Consejo: mantén abierta esta ventana para no perder eventos de CENTRAL.");
+        sugerencia.setForeground(ATENUADO);
+        sugerencia.setFont(new Font("SansSerif", Font.PLAIN, 11));
 
-        south.add(scroll, BorderLayout.CENTER);
-        south.add(hint, BorderLayout.SOUTH);
-        return south;
+        sur.add(desplazamiento, BorderLayout.CENTER);
+        sur.add(sugerencia, BorderLayout.SOUTH);
+        return sur;
     }
 
-    private JPanel row(JComponent... components) {
+    private JPanel fila(JComponent... componentes) {
         JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 4));
         panel.setOpaque(false);
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        for (JComponent component : components) panel.add(component);
+        for (JComponent componente : componentes) panel.add(componente);
         return panel;
     }
 
-    private JPanel leftRow(JComponent component) {
+    private JPanel filaIzquierda(JComponent componente) {
         JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         panel.setOpaque(false);
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.add(component);
+        panel.add(componente);
         return panel;
     }
 
-    private JLabel label(String text) {
-        JLabel label = new JLabel(text);
-        label.setForeground(TEXT);
-        label.setFont(new Font("SansSerif", Font.PLAIN, 13));
-        return label;
+    private JLabel etiqueta(String texto) {
+        JLabel etiqueta = new JLabel(texto);
+        etiqueta.setForeground(TEXTO);
+        etiqueta.setFont(new Font("SansSerif", Font.PLAIN, 13));
+        return etiqueta;
     }
 
-    private JLabel note(String text) {
-        JLabel label = new JLabel("<html><div style='width:620px'>" + text + "</div></html>");
-        label.setForeground(MUTED);
-        label.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        label.setAlignmentX(Component.LEFT_ALIGNMENT);
-        return label;
+    private JLabel nota(String texto) {
+        JLabel etiqueta = new JLabel("<html><div style='width:620px'>" + texto + "</div></html>");
+        etiqueta.setForeground(ATENUADO);
+        etiqueta.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        etiqueta.setAlignmentX(Component.LEFT_ALIGNMENT);
+        return etiqueta;
     }
 
     // ------------------------------------------------------------------ Kafka
 
-    private synchronized void connect() {
-        if (connecting || closing) return;
-        connecting = true;
-        busy = true;
-        updateControls();
-        setKafkaStatus("Kafka: conectando...", MUTED);
+    private synchronized void conectar() {
+        if (conectando || cerrando) return;
+        conectando = true;
+        ocupado = true;
+        actualizarControles();
+        actualizarEstadoKafka("Kafka: conectando...", ATENUADO);
 
         new Thread(() -> {
-            KafkaOperatorClient previous = kafka;
+            ClienteKafkaOperario anterior = kafka;
             kafka = null;
-            connected = false;
-            if (previous != null) {
-                try { previous.close(); } catch (Exception ignored) { }
+            conectado = false;
+            if (anterior != null) {
+                try { anterior.cerrar(); } catch (Exception ignorada) { }
             }
-            KafkaOperatorClient client = null;
+            ClienteKafkaOperario cliente = null;
             try {
-                client = new KafkaOperatorClient(
-                        formatBootstrap(ipBroker, puertoBroker), operatorId);
-                client.start();
-                if (closing) {
-                    client.close();
+                cliente = new ClienteKafkaOperario(
+                        formatearBootstrap(ipBroker, puertoBroker), idOperario);
+                cliente.iniciar();
+                if (cerrando) {
+                    cliente.cerrar();
                     return;
                 }
-                kafka = client;
-                connected = true;
-                log("Kafka conectado. Topics: " + KafkaOperatorClient.TOPIC_SOLICITUDES
-                        + " / " + KafkaOperatorClient.TOPIC_RESPUESTAS);
-                SwingUtilities.invokeLater(() -> setKafkaStatus("Kafka: conectado", GREEN));
+                kafka = cliente;
+                conectado = true;
+                registrar("Kafka conectado. Topics: " + ClienteKafkaOperario.TOPICO_SOLICITUDES
+                        + " / " + ClienteKafkaOperario.TOPICO_RESPUESTAS);
+                SwingUtilities.invokeLater(() -> actualizarEstadoKafka("Kafka: conectado", VERDE));
+                recuperarPendientes();
             } catch (Exception e) {
-                connected = false;
-                if (client != null) {
-                    try { client.close(); } catch (Exception ignored) { }
+                conectado = false;
+                if (cliente != null) {
+                    try { cliente.cerrar(); } catch (Exception ignorada) { }
                 }
-                log("No se pudo iniciar la comunicación Kafka: " + e.getMessage());
-                SwingUtilities.invokeLater(() -> setKafkaStatus("Kafka: sin conexión", RED));
+                registrar("No se pudo iniciar la comunicación Kafka: " + e.getMessage());
+                SwingUtilities.invokeLater(() -> actualizarEstadoKafka("Kafka: sin conexión", ROJO));
             } finally {
-                connecting = false;
-                busy = false;
-                SwingUtilities.invokeLater(this::updateControls);
+                conectando = false;
+                ocupado = false;
+                SwingUtilities.invokeLater(this::actualizarControles);
             }
-        }, "wm-fo-gui-connect").start();
+        }, "wm-fo-gui-conectar").start();
     }
 
-    private void closeClient() {
-        closing = true;
-        KafkaOperatorClient client = kafka;
-        kafka = null;
-        connected = false;
-        if (client != null) {
-            try { client.close(); } catch (Exception ignored) { }
+    /** Recupera el estado de los riegos pendientes de sesiones anteriores. */
+    private void recuperarPendientes() {
+        ClienteKafkaOperario cliente = kafka;
+        if (cliente == null) return;
+        List<ClienteKafkaOperario.Pendiente> pendientes = cliente.cargarPendientes();
+        if (pendientes.isEmpty()) return;
+        registrar("Se han encontrado " + pendientes.size()
+                + " servicios pendientes de sesiones anteriores. Consultando su estado...");
+        for (ClienteKafkaOperario.Pendiente pendiente : pendientes) {
+            try {
+                cliente.solicitarEstado(pendiente.idSolicitud);
+                long limite = System.nanoTime()
+                        + Duration.ofSeconds(TIMEOUT_RECUPERACION_SEGUNDOS).toNanos();
+                boolean resuelto = false;
+                while (System.nanoTime() < limite) {
+                    long restante = limite - System.nanoTime();
+                    Map<String, Object> evento = cliente.esperarEvento(pendiente.idSolicitud,
+                            Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
+                    if (evento == null) continue;
+                    registrar("[RECUPERADO] " + describir(evento));
+                    String estado = texto(evento.get("status"));
+                    if (esExito(estado) || esFracaso(estado)) {
+                        cliente.resolverPendiente(pendiente.idSolicitud);
+                        resuelto = true;
+                        break;
+                    }
+                }
+                if (!resuelto) {
+                    registrar("No se conoce aún la conclusión de " + pendiente.idSolicitud
+                            + "; seguirá pendiente para la próxima ejecución.");
+                }
+            } catch (Exception e) {
+                registrar("No se pudo recuperar " + pendiente.idSolicitud + ": " + e.getMessage());
+            } finally {
+                cliente.finalizarSolicitud(pendiente.idSolicitud);
+            }
         }
     }
 
-    private void updateControls() {
-        boolean ready = connected && !busy;
-        manualButton.setEnabled(ready);
-        fileButton.setEnabled(ready);
-        listButton.setEnabled(ready);
-        reconnectButton.setEnabled(!busy);
+    private void cerrarCliente() {
+        cerrando = true;
+        ClienteKafkaOperario cliente = kafka;
+        kafka = null;
+        conectado = false;
+        if (cliente != null) {
+            try { cliente.cerrar(); } catch (Exception ignorada) { }
+        }
     }
 
-    private void setKafkaStatus(String text, Color color) {
-        kafkaBadge.setText(text);
-        kafkaBadge.setForeground(color);
+    private void actualizarControles() {
+        boolean listo = conectado && !ocupado;
+        botonManual.setEnabled(listo);
+        botonFichero.setEnabled(listo);
+        botonListado.setEnabled(listo);
+        botonReconectar.setEnabled(!ocupado);
     }
 
-    private void updateCentralStatus() {
-        boolean alive = connected && !closing && kafka != null && kafka.isCentralAlive();
-        if (!connected) {
-            centralBadge.setText("Central: sin conexión");
-            centralBadge.setForeground(MUTED);
-        } else if (alive) {
-            centralBadge.setText("Central: CONECTADA");
-            centralBadge.setForeground(GREEN);
+    private void actualizarEstadoKafka(String texto, Color color) {
+        etiquetaKafka.setText(texto);
+        etiquetaKafka.setForeground(color);
+    }
+
+    private void actualizarEstadoCentral() {
+        boolean vivo = conectado && !cerrando && kafka != null && kafka.centralViva();
+        if (!conectado) {
+            etiquetaCentral.setText("Central: sin conexión");
+            etiquetaCentral.setForeground(ATENUADO);
+        } else if (vivo) {
+            etiquetaCentral.setText("Central: CONECTADA");
+            etiquetaCentral.setForeground(VERDE);
         } else {
-            centralBadge.setText("Central: SIN LATIDO");
-            centralBadge.setForeground(RED);
+            etiquetaCentral.setText("Central: SIN LATIDO");
+            etiquetaCentral.setForeground(ROJO);
         }
     }
 
     // ------------------------------------------------------------------ Acciones
 
-    private void requestManual() {
-        if (!readyForOperation()) return;
-        int wsId = ((Number) wsSpinner.getValue()).intValue();
-        int duration = ((Number) durationSpinner.getValue()).intValue();
-        beginOperation();
+    private void solicitarManual() {
+        if (!listoParaOperar()) return;
+        int idWs = ((Number) selectorWs.getValue()).intValue();
+        int duracion = ((Number) selectorDuracion.getValue()).intValue();
+        comenzarOperacion();
         new Thread(() -> {
             try {
-                ejecutarServicio(wsId, duration, "Solicitud manual");
+                ejecutarServicio(idWs, duracion, "Solicitud manual");
             } finally {
-                SwingUtilities.invokeLater(this::endOperation);
+                SwingUtilities.invokeLater(this::terminarOperacion);
             }
         }, "wm-fo-gui-manual").start();
     }
 
-    private void processFile() {
-        if (!readyForOperation()) return;
-        String pathText = fileField.getText().trim();
-        if (pathText.isEmpty()) {
+    private void procesarFichero() {
+        if (!listoParaOperar()) return;
+        String rutaTexto = campoFichero.getText().trim();
+        if (rutaTexto.isEmpty()) {
             JOptionPane.showMessageDialog(this, "Indica la ruta del fichero de servicios.",
                     "WM_FO", JOptionPane.WARNING_MESSAGE);
             return;
         }
 
-        final List<Servicio> services;
+        final List<Servicio> servicios;
         try {
-            services = readServices(Paths.get(pathText));
+            servicios = leerServicios(Paths.get(rutaTexto));
         } catch (IOException | IllegalArgumentException e) {
             JOptionPane.showMessageDialog(this, "No se ha podido cargar el fichero:\n" + e.getMessage(),
                     "WM_FO", JOptionPane.ERROR_MESSAGE);
             return;
         }
-        if (services.isEmpty()) {
+        if (servicios.isEmpty()) {
             JOptionPane.showMessageDialog(this, "El fichero no contiene servicios.",
                     "WM_FO", JOptionPane.INFORMATION_MESSAGE);
             return;
         }
 
-        beginOperation();
+        comenzarOperacion();
         new Thread(() -> {
             try {
-                log("Se han validado " + services.size() + " servicios. Comienza el envío secuencial.");
-                for (int i = 0; i < services.size(); i++) {
-                    Servicio service = services.get(i);
-                    log("Servicio " + (i + 1) + "/" + services.size() + " (línea " + service.line
-                            + "): WS=" + service.wsId + ", duración=" + service.durationSeconds + " s");
-                    Result result = ejecutarServicio(service.wsId, service.durationSeconds,
-                            "Servicio de fichero, línea " + service.line);
-                    if (result == Result.DESCONOCIDO) {
-                        log("Se detiene el procesamiento: no se conoce la conclusión del servicio.");
+                registrar("Se han validado " + servicios.size() + " servicios. Comienza el envío secuencial.");
+                for (int i = 0; i < servicios.size(); i++) {
+                    Servicio servicio = servicios.get(i);
+                    registrar("Servicio " + (i + 1) + "/" + servicios.size() + " (línea " + servicio.linea
+                            + "): WS=" + servicio.idWs + ", duración=" + servicio.duracionSegundos + " s");
+                    Resultado resultado = ejecutarServicio(servicio.idWs, servicio.duracionSegundos,
+                            "Servicio de fichero, línea " + servicio.linea);
+                    if (resultado == Resultado.DESCONOCIDO) {
+                        registrar("Se detiene el procesamiento: no se conoce la conclusión del servicio.");
                         return;
                     }
-                    if (i < services.size() - 1) {
-                        log("Esperando 4 segundos antes del siguiente servicio...");
+                    if (i < servicios.size() - 1) {
+                        registrar("Esperando 4 segundos antes del siguiente servicio...");
                         try {
-                            Thread.sleep(PAUSE_BETWEEN_FILE_SERVICES_MS);
+                            Thread.sleep(PAUSA_ENTRE_SERVICIOS_MS);
                         } catch (InterruptedException e) {
                             Thread.currentThread().interrupt();
-                            log("Procesamiento del fichero interrumpido.");
+                            registrar("Procesamiento del fichero interrumpido.");
                             return;
                         }
                     }
                 }
-                log("Procesamiento del fichero terminado.");
+                registrar("Procesamiento del fichero terminado.");
             } finally {
-                SwingUtilities.invokeLater(this::endOperation);
+                SwingUtilities.invokeLater(this::terminarOperacion);
             }
-        }, "wm-fo-gui-file").start();
-    }
-
-    private void listAvailable() {
-        if (!readyForOperation()) return;
-        beginOperation();
-        new Thread(() -> {
-            try {
-                consultarDisponibles();
-            } finally {
-                SwingUtilities.invokeLater(this::endOperation);
-            }
-        }, "wm-fo-gui-list").start();
-    }
-
-    private Result ejecutarServicio(int wsId, int durationSeconds, String origin) {
-        KafkaOperatorClient client = kafka;
-        if (client == null) {
-            log("Kafka no está conectado.");
-            return Result.DESCONOCIDO;
-        }
-
-        final String requestId;
-        try {
-            log(origin + ". Operario=" + operatorId + ", WS=" + wsId
-                    + ", duración=" + durationSeconds + " s");
-            requestId = client.solicitarRiego(wsId, durationSeconds);
-            log("Solicitud publicada en Kafka. Request ID: " + requestId);
-        } catch (Exception e) {
-            log("No se pudo publicar la solicitud: " + e.getMessage());
-            return Result.DESCONOCIDO;
-        }
-
-        try {
-            long timeout = serviceTimeoutSeconds(durationSeconds);
-            long deadline = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
-            while (true) {
-                long remaining = deadline - System.nanoTime();
-                if (remaining <= 0) {
-                    log("Timeout: han pasado " + timeout
-                            + " s sin conclusión. El resultado es desconocido; el riego no se cancela.");
-                    return Result.DESCONOCIDO;
-                }
-                Map<String, Object> event = client.esperarEvento(requestId,
-                        Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
-                if (event == null) continue;
-
-                log(describe(event));
-                String status = text(event.get("status"));
-                if (isSuccess(status)) {
-                    log("Riego finalizado correctamente.");
-                    return Result.EXITO;
-                }
-                if (isFailure(status)) {
-                    log("El servicio ha concluido sin éxito (" + status + ").");
-                    return Result.FRACASO;
-                }
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log("Espera interrumpida; el resultado del servicio es desconocido.");
-            return Result.DESCONOCIDO;
-        } catch (Exception e) {
-            log("Se ha perdido la capacidad de recibir el resultado: " + e.getMessage());
-            return Result.DESCONOCIDO;
-        } finally {
-            client.finalizarSolicitud(requestId);
-        }
+        }, "wm-fo-gui-fichero").start();
     }
 
     private void consultarDisponibles() {
-        KafkaOperatorClient client = kafka;
-        if (client == null) {
-            log("Kafka no está conectado.");
-            return;
+        if (!listoParaOperar()) return;
+        comenzarOperacion();
+        new Thread(() -> {
+            try {
+                listarDisponibles();
+            } finally {
+                SwingUtilities.invokeLater(this::terminarOperacion);
+            }
+        }, "wm-fo-gui-listado").start();
+    }
+
+    private Resultado ejecutarServicio(int idWs, int duracionSegundos, String origen) {
+        ClienteKafkaOperario cliente = kafka;
+        if (cliente == null) {
+            registrar("Kafka no está conectado.");
+            return Resultado.DESCONOCIDO;
         }
 
-        final String requestId;
+        final String idSolicitud;
         try {
-            requestId = client.solicitarListadoWsDisponibles();
-            log("Consultando estaciones disponibles... Request ID: " + requestId);
+            registrar(origen + ". Operario=" + idOperario + ", WS=" + idWs
+                    + ", duración=" + duracionSegundos + " s");
+            idSolicitud = cliente.solicitarRiego(idWs, duracionSegundos);
+            registrar("Solicitud publicada en Kafka. Request ID: " + idSolicitud);
         } catch (Exception e) {
-            log("No se pudo solicitar el listado a CENTRAL: " + e.getMessage());
+            registrar("No se pudo publicar la solicitud: " + e.getMessage());
+            return Resultado.DESCONOCIDO;
+        }
+
+        try {
+            long timeout = segundosTimeoutServicio(duracionSegundos);
+            long limite = System.nanoTime() + Duration.ofSeconds(timeout).toNanos();
+            while (true) {
+                long restante = limite - System.nanoTime();
+                if (restante <= 0) {
+                    registrar("Timeout: han pasado " + timeout
+                            + " s sin conclusión. El resultado es desconocido; el riego no se cancela.");
+                    return Resultado.DESCONOCIDO;
+                }
+                Map<String, Object> evento = cliente.esperarEvento(idSolicitud,
+                        Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
+                if (evento == null) continue;
+
+                registrar(describir(evento));
+                String estado = texto(evento.get("status"));
+                if (esExito(estado)) {
+                    registrar("Riego finalizado correctamente.");
+                    cliente.resolverPendiente(idSolicitud);
+                    return Resultado.EXITO;
+                }
+                if (esFracaso(estado)) {
+                    registrar("El servicio ha concluido sin éxito (" + estado + ").");
+                    cliente.resolverPendiente(idSolicitud);
+                    return Resultado.FRACASO;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            registrar("Espera interrumpida; el resultado del servicio es desconocido.");
+            return Resultado.DESCONOCIDO;
+        } catch (Exception e) {
+            registrar("Se ha perdido la capacidad de recibir el resultado: " + e.getMessage());
+            return Resultado.DESCONOCIDO;
+        } finally {
+            cliente.finalizarSolicitud(idSolicitud);
+        }
+    }
+
+    private void listarDisponibles() {
+        ClienteKafkaOperario cliente = kafka;
+        if (cliente == null) {
+            registrar("Kafka no está conectado.");
+            return;
+        }
+
+        final String idSolicitud;
+        try {
+            idSolicitud = cliente.solicitarListadoWsDisponibles();
+            registrar("Consultando estaciones disponibles... Request ID: " + idSolicitud);
+        } catch (Exception e) {
+            registrar("No se pudo solicitar el listado a CENTRAL: " + e.getMessage());
             return;
         }
 
         try {
-            long deadline = System.nanoTime() + Duration.ofSeconds(DEFAULT_LIST_TIMEOUT_SECONDS).toNanos();
-            while (System.nanoTime() < deadline) {
-                long remaining = deadline - System.nanoTime();
-                Map<String, Object> event = client.esperarEvento(requestId,
-                        Duration.ofNanos(Math.min(remaining, Duration.ofSeconds(1).toNanos())));
-                if (event == null) continue;
+            long limite = System.nanoTime() + Duration.ofSeconds(TIMEOUT_LISTADO_SEGUNDOS).toNanos();
+            while (System.nanoTime() < limite) {
+                long restante = limite - System.nanoTime();
+                Map<String, Object> evento = cliente.esperarEvento(idSolicitud,
+                        Duration.ofNanos(Math.min(restante, Duration.ofSeconds(1).toNanos())));
+                if (evento == null) continue;
 
-                if ("AVAILABLE_WS_LIST".equalsIgnoreCase(text(event.get("type")))
-                        || event.get("stations") instanceof List<?>) {
-                    final List<Map<String, Object>> stations = toStations(event.get("stations"));
-                    SwingUtilities.invokeLater(() -> showStations(stations));
+                if ("AVAILABLE_WS_LIST".equalsIgnoreCase(texto(evento.get("type")))
+                        || evento.get("stations") instanceof List<?>) {
+                    final List<Map<String, Object>> estaciones = aEstaciones(evento.get("stations"));
+                    SwingUtilities.invokeLater(() -> mostrarEstaciones(estaciones));
                     return;
                 }
-                log(describe(event));
-                if (isFailure(text(event.get("status")))) {
-                    log("CENTRAL no ha podido proporcionar el listado.");
+                registrar(describir(evento));
+                if (esFracaso(texto(evento.get("status")))) {
+                    registrar("CENTRAL no ha podido proporcionar el listado.");
                     return;
                 }
             }
-            log("CENTRAL no respondió al listado en " + DEFAULT_LIST_TIMEOUT_SECONDS + " segundos.");
+            registrar("CENTRAL no respondió al listado en " + TIMEOUT_LISTADO_SEGUNDOS + " segundos.");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            log("Consulta de WS interrumpida.");
+            registrar("Consulta de WS interrumpida.");
         } catch (Exception e) {
-            log("No se pudo recibir el listado: " + e.getMessage());
+            registrar("No se pudo recibir el listado: " + e.getMessage());
         } finally {
-            client.finalizarSolicitud(requestId);
+            cliente.finalizarSolicitud(idSolicitud);
         }
     }
 
-    private void showStations(List<Map<String, Object>> stations) {
-        stationsModel.setRowCount(0);
-        for (Map<String, Object> station : stations) {
-            String state = text(station.get("state"));
-            Object available = station.get("available");
-            boolean isAvailable = Boolean.TRUE.equals(available)
-                    || "ACTIVADA".equalsIgnoreCase(state) || "AVAILABLE".equalsIgnoreCase(state);
-            if (available != null && !Boolean.TRUE.equals(available)) continue;
-            if (available == null && state != null && !isAvailable) continue;
+    private void mostrarEstaciones(List<Map<String, Object>> estaciones) {
+        modeloEstaciones.setRowCount(0);
+        for (Map<String, Object> estacion : estaciones) {
+            String estado = texto(estacion.get("state"));
+            Object valorAvailable = estacion.get("available");
+            boolean disponible = Boolean.TRUE.equals(valorAvailable)
+                    || "ACTIVADA".equalsIgnoreCase(estado) || "AVAILABLE".equalsIgnoreCase(estado);
+            if (valorAvailable != null && !Boolean.TRUE.equals(valorAvailable)) continue;
+            if (valorAvailable == null && estado != null && !disponible) continue;
 
-            String id = text(station.containsKey("wsId") ? station.get("wsId") : station.get("id"));
-            String location = text(station.get("location"));
-            stationsModel.addRow(new Object[]{id == null ? "?" : id,
-                    location == null ? "Sin ubicación" : location,
-                    state == null ? "ACTIVADA" : state});
-            log("WS disponible: " + id + " | " + location + " | " + state);
+            String id = texto(estacion.containsKey("wsId") ? estacion.get("wsId") : estacion.get("id"));
+            String ubicacion = texto(estacion.get("location"));
+            modeloEstaciones.addRow(new Object[]{id == null ? "?" : id,
+                    ubicacion == null ? "Sin ubicación" : ubicacion,
+                    estado == null ? "ACTIVADA" : estado});
+            registrar("WS disponible: " + id + " | " + ubicacion + " | " + estado);
         }
-        if (stationsModel.getRowCount() == 0) {
-            log("No hay estaciones disponibles en este momento.");
+        if (modeloEstaciones.getRowCount() == 0) {
+            registrar("No hay estaciones disponibles en este momento.");
         }
     }
 
-    private void chooseFile() {
-        JFileChooser chooser = new JFileChooser();
-        if (!fileField.getText().trim().isEmpty()) {
-            chooser.setSelectedFile(Paths.get(fileField.getText().trim()).toFile());
+    private void elegirFichero() {
+        JFileChooser selector = new JFileChooser();
+        if (!campoFichero.getText().trim().isEmpty()) {
+            selector.setSelectedFile(Paths.get(campoFichero.getText().trim()).toFile());
         }
-        if (chooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
-            fileField.setText(chooser.getSelectedFile().getAbsolutePath());
+        if (selector.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+            campoFichero.setText(selector.getSelectedFile().getAbsolutePath());
         }
     }
 
     // ------------------------------------------------------------------ Apoyo
 
-    private boolean readyForOperation() {
-        if (!connected || kafka == null) {
+    private boolean listoParaOperar() {
+        if (!conectado || kafka == null) {
             JOptionPane.showMessageDialog(this, "Kafka no está conectado. Pulsa 'Reconectar'.",
                     "WM_FO", JOptionPane.WARNING_MESSAGE);
             return false;
         }
-        if (busy) return false;
+        if (ocupado) return false;
         return true;
     }
 
-    private void beginOperation() {
-        busy = true;
-        updateControls();
+    private void comenzarOperacion() {
+        ocupado = true;
+        actualizarControles();
     }
 
-    private void endOperation() {
-        busy = false;
-        updateControls();
+    private void terminarOperacion() {
+        ocupado = false;
+        actualizarControles();
     }
 
-    private void log(String message) {
-        final String line = "[" + LocalTime.now().withNano(0) + "] " + message;
+    private void registrar(String mensaje) {
+        final String linea = "[" + LocalTime.now().withNano(0) + "] " + mensaje;
         SwingUtilities.invokeLater(() -> {
-            logArea.append(line + "\n");
-            logArea.setCaretPosition(logArea.getDocument().getLength());
+            areaRegistro.append(linea + "\n");
+            areaRegistro.setCaretPosition(areaRegistro.getDocument().getLength());
         });
     }
 
-    private static String describe(Map<String, Object> event) {
-        StringBuilder line = new StringBuilder("[CENTRAL] ");
-        String status = text(event.get("status"));
-        line.append(status == null || status.isEmpty() ? "Evento recibido" : status);
-        String message = text(event.get("message"));
-        if (message != null && !message.isEmpty()) line.append(" - ").append(message);
+    private static String describir(Map<String, Object> evento) {
+        StringBuilder linea = new StringBuilder("[CENTRAL] ");
+        String estado = texto(evento.get("status"));
+        linea.append(estado == null || estado.isEmpty() ? "Evento recibido" : estado);
+        String mensaje = texto(evento.get("message"));
+        if (mensaje != null && !mensaje.isEmpty()) linea.append(" - ").append(mensaje);
 
-        Object flow = event.get("flowLMin");
-        Object volume = event.get("volumeLitres");
-        Object serviceVolume = event.get("serviceVolumeLitres");
-        Object elapsed = event.get("elapsedSeconds");
-        if (flow != null || volume != null || serviceVolume != null || elapsed != null) {
-            line.append(" | Telemetría");
-            if (flow != null) line.append(": caudal ").append(decimal(flow)).append(" L/min");
-            if (volume != null) line.append(", acumulado ").append(decimal(volume)).append(" L");
-            if (serviceVolume != null) line.append(", servicio ").append(decimal(serviceVolume)).append(" L");
-            if (elapsed != null) line.append(", tiempo ").append(text(elapsed)).append(" s");
+        Object caudal = evento.get("flowLMin");
+        Object volumen = evento.get("volumeLitres");
+        Object volumenServicio = evento.get("serviceVolumeLitres");
+        Object transcurrido = evento.get("elapsedSeconds");
+        if (caudal != null || volumen != null || volumenServicio != null || transcurrido != null) {
+            linea.append(" | Telemetría");
+            if (caudal != null) linea.append(": caudal ").append(decimal(caudal)).append(" L/min");
+            if (volumen != null) linea.append(", acumulado ").append(decimal(volumen)).append(" L");
+            if (volumenServicio != null) linea.append(", servicio ").append(decimal(volumenServicio)).append(" L");
+            if (transcurrido != null) linea.append(", tiempo ").append(texto(transcurrido)).append(" s");
         }
-        return line.toString();
+        return linea.toString();
     }
 
-    private List<Servicio> readServices(Path path) throws IOException {
-        List<Servicio> services = new ArrayList<>();
-        int lineNumber = 0;
-        try (BufferedReader reader = Files.newBufferedReader(path, StandardCharsets.UTF_8)) {
-            String line;
-            while ((line = reader.readLine()) != null) {
-                lineNumber++;
-                String content = line.trim();
-                if (content.isEmpty() || content.startsWith("#")) continue;
+    private List<Servicio> leerServicios(Path ruta) throws IOException {
+        List<Servicio> servicios = new ArrayList<>();
+        int numeroLinea = 0;
+        try (BufferedReader lector = Files.newBufferedReader(ruta, StandardCharsets.UTF_8)) {
+            String linea;
+            while ((linea = lector.readLine()) != null) {
+                numeroLinea++;
+                String contenido = linea.trim();
+                if (contenido.isEmpty() || contenido.startsWith("#")) continue;
 
-                String[] fields = content.split(";", -1);
-                if (fields.length != 2) {
-                    throw new IllegalArgumentException("Línea " + lineNumber
+                String[] campos = contenido.split(";", -1);
+                if (campos.length != 2) {
+                    throw new IllegalArgumentException("Línea " + numeroLinea
                             + ": se esperaba el formato wsId;duracionSegundos.");
                 }
-                int wsId;
-                int duration;
+                int idWs;
+                int duracion;
                 try {
-                    wsId = Integer.parseInt(fields[0].trim());
-                    duration = Integer.parseInt(fields[1].trim());
+                    idWs = Integer.parseInt(campos[0].trim());
+                    duracion = Integer.parseInt(campos[1].trim());
                 } catch (NumberFormatException e) {
-                    throw new IllegalArgumentException("Línea " + lineNumber
+                    throw new IllegalArgumentException("Línea " + numeroLinea
                             + ": el ID de WS y la duración deben ser números enteros.");
                 }
-                if (wsId <= 0) {
-                    throw new IllegalArgumentException("Línea " + lineNumber + ": el ID de WS debe ser positivo.");
+                if (idWs <= 0) {
+                    throw new IllegalArgumentException("Línea " + numeroLinea + ": el ID de WS debe ser positivo.");
                 }
-                if (duration <= 0 || duration > 86400) {
-                    throw new IllegalArgumentException("Línea " + lineNumber
+                if (duracion <= 0 || duracion > 86400) {
+                    throw new IllegalArgumentException("Línea " + numeroLinea
                             + ": la duración debe estar entre 1 y 86400 segundos.");
                 }
-                services.add(new Servicio(wsId, duration, lineNumber));
+                servicios.add(new Servicio(idWs, duracion, numeroLinea));
             }
         }
-        return services;
+        return servicios;
     }
 
-    private static long serviceTimeoutSeconds(int durationSeconds) {
-        long fallback = Math.max(DEFAULT_MIN_SERVICE_TIMEOUT_SECONDS,
-                (long) durationSeconds + EXTRA_SERVICE_TIMEOUT_SECONDS);
-        String configured = System.getenv("WM_FO_TIMEOUT_SECONDS");
-        if (configured == null || configured.trim().isEmpty()) return fallback;
+    private static long segundosTimeoutServicio(int duracionSegundos) {
+        long porDefecto = Math.max(TIMEOUT_MINIMO_SERVICIO_SEGUNDOS,
+                (long) duracionSegundos + SEGUNDOS_EXTRA_SERVICIO);
+        String configurado = System.getenv("WM_FO_TIMEOUT_SECONDS");
+        if (configurado == null || configurado.trim().isEmpty()) return porDefecto;
         try {
-            long value = Long.parseLong(configured.trim());
-            return value > 0 ? value : fallback;
+            long valor = Long.parseLong(configurado.trim());
+            return valor > 0 ? valor : porDefecto;
         } catch (NumberFormatException e) {
-            return fallback;
+            return porDefecto;
         }
     }
 
-    private static String formatBootstrap(String host, int port) {
-        if (host.contains(":") && !host.startsWith("[")) return "[" + host + "]:" + port;
-        return host + ":" + port;
+    private static String formatearBootstrap(String anfitrion, int puerto) {
+        if (anfitrion.contains(":") && !anfitrion.startsWith("[")) return "[" + anfitrion + "]:" + puerto;
+        return anfitrion + ":" + puerto;
     }
 
     @SuppressWarnings("unchecked")
-    private static List<Map<String, Object>> toStations(Object value) {
-        List<Map<String, Object>> stations = new ArrayList<>();
-        if (!(value instanceof List<?>)) return stations;
-        for (Object item : (List<?>) value) {
-            if (!(item instanceof Map<?, ?>)) continue;
-            Map<String, Object> station = new LinkedHashMap<>();
-            for (Map.Entry<?, ?> entry : ((Map<?, ?>) item).entrySet()) {
-                station.put(String.valueOf(entry.getKey()), entry.getValue());
+    private static List<Map<String, Object>> aEstaciones(Object valor) {
+        List<Map<String, Object>> estaciones = new ArrayList<>();
+        if (!(valor instanceof List<?>)) return estaciones;
+        for (Object elemento : (List<?>) valor) {
+            if (!(elemento instanceof Map<?, ?>)) continue;
+            Map<String, Object> estacion = new LinkedHashMap<>();
+            for (Map.Entry<?, ?> entrada : ((Map<?, ?>) elemento).entrySet()) {
+                estacion.put(String.valueOf(entrada.getKey()), entrada.getValue());
             }
-            stations.add(station);
+            estaciones.add(estacion);
         }
-        return stations;
+        return estaciones;
     }
 
-    private static boolean isSuccess(String status) {
-        String value = status == null ? "" : status.trim().toUpperCase(Locale.ROOT);
-        return value.equals("COMPLETED") || value.equals("COMPLETADO")
-                || value.equals("FINALIZADO") || value.equals("SUCCESS")
-                || value.equals("EXITO") || value.equals("ÉXITO");
+    private static boolean esExito(String estado) {
+        String valor = estado == null ? "" : estado.trim().toUpperCase(Locale.ROOT);
+        return valor.equals("COMPLETED") || valor.equals("COMPLETADO")
+                || valor.equals("FINALIZADO") || valor.equals("SUCCESS")
+                || valor.equals("EXITO") || valor.equals("ÉXITO");
     }
 
-    private static boolean isFailure(String status) {
-        String value = status == null ? "" : status.trim().toUpperCase(Locale.ROOT);
-        return value.equals("REJECTED") || value.equals("RECHAZADO")
-                || value.equals("FAILED") || value.equals("FALLO")
-                || value.equals("ERROR") || value.equals("CANCELLED")
-                || value.equals("CANCELADO") || value.equals("FRACASO")
-                || value.equals("DENEGADO") || value.equals("RECHAZADA");
+    private static boolean esFracaso(String estado) {
+        String valor = estado == null ? "" : estado.trim().toUpperCase(Locale.ROOT);
+        return valor.equals("REJECTED") || valor.equals("RECHAZADO")
+                || valor.equals("FAILED") || valor.equals("FALLO")
+                || valor.equals("ERROR") || valor.equals("CANCELLED")
+                || valor.equals("CANCELADO") || valor.equals("FRACASO")
+                || valor.equals("DENEGADO") || valor.equals("RECHAZADA");
     }
 
-    private static String text(Object value) {
-        return value == null ? null : String.valueOf(value);
+    private static String texto(Object valor) {
+        return valor == null ? null : String.valueOf(valor);
     }
 
-    private static String decimal(Object value) {
+    private static String decimal(Object valor) {
         try {
-            double number = value instanceof Number
-                    ? ((Number) value).doubleValue()
-                    : Double.parseDouble(String.valueOf(value));
-            return String.format(Locale.ROOT, "%.2f", number);
+            double numero = valor instanceof Number
+                    ? ((Number) valor).doubleValue()
+                    : Double.parseDouble(String.valueOf(valor));
+            return String.format(Locale.ROOT, "%.2f", numero);
         } catch (Exception e) {
-            return String.valueOf(value);
+            return String.valueOf(valor);
         }
     }
 
-    private enum Result { EXITO, FRACASO, DESCONOCIDO }
+    private enum Resultado { EXITO, FRACASO, DESCONOCIDO }
 
     private static final class Servicio {
-        final int wsId;
-        final int durationSeconds;
-        final int line;
+        final int idWs;
+        final int duracionSegundos;
+        final int linea;
 
-        Servicio(int wsId, int durationSeconds, int line) {
-            this.wsId = wsId;
-            this.durationSeconds = durationSeconds;
-            this.line = line;
+        Servicio(int idWs, int duracionSegundos, int linea) {
+            this.idWs = idWs;
+            this.duracionSegundos = duracionSegundos;
+            this.linea = linea;
         }
     }
 }

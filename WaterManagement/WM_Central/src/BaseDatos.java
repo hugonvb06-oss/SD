@@ -25,24 +25,24 @@ public final class BaseDatos implements AutoCloseable {
                 s.execute("CREATE TABLE IF NOT EXISTS Operario (id_operario INTEGER PRIMARY KEY, nombre TEXT NOT NULL)");
                 s.execute("CREATE TABLE IF NOT EXISTS SolicitudRiego (request_id TEXT PRIMARY KEY, operator_id INTEGER NOT NULL, ws_id INTEGER NOT NULL, duration_seconds INTEGER NOT NULL, status TEXT NOT NULL, terminal_event TEXT, terminal_sent INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)");
             }
-            ensureColumn("WS", "ultima_conexion", "TEXT");
-            ensureColumn("WS", "estado", "TEXT NOT NULL DEFAULT 'DESCONECTADA'");
-            ensureColumn("WS", "cant_agua", "REAL NOT NULL DEFAULT 0");
-            ensureColumn("SolicitudRiego", "terminal_event", "TEXT");
-            ensureColumn("SolicitudRiego", "terminal_sent", "INTEGER NOT NULL DEFAULT 0");
+            asegurarColumna("WS", "ultima_conexion", "TEXT");
+            asegurarColumna("WS", "estado", "TEXT NOT NULL DEFAULT 'DESCONECTADA'");
+            asegurarColumna("WS", "cant_agua", "REAL NOT NULL DEFAULT 0");
+            asegurarColumna("SolicitudRiego", "terminal_event", "TEXT");
+            asegurarColumna("SolicitudRiego", "terminal_sent", "INTEGER NOT NULL DEFAULT 0");
             System.out.println("Conectado con la base de datos SQLite: " + rutaBD);
         } catch (SQLException e) {
             throw new IllegalStateException("No se pudo abrir o preparar la base de datos SQLite: " + e.getMessage(), e);
         }
     }
 
-    private void ensureColumn(String table, String column, String definition) throws SQLException {
-        boolean found = false;
-        try (Statement s = conexion.createStatement(); ResultSet rs = s.executeQuery("PRAGMA table_info(" + table + ")")) {
-            while (rs.next()) if (column.equalsIgnoreCase(rs.getString("name"))) found = true;
+    private void asegurarColumna(String tabla, String columna, String definicion) throws SQLException {
+        boolean encontrada = false;
+        try (Statement s = conexion.createStatement(); ResultSet rs = s.executeQuery("PRAGMA table_info(" + tabla + ")")) {
+            while (rs.next()) if (columna.equalsIgnoreCase(rs.getString("name"))) encontrada = true;
         }
-        if (!found) try (Statement s = conexion.createStatement()) {
-            s.execute("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+        if (!encontrada) try (Statement s = conexion.createStatement()) {
+            s.execute("ALTER TABLE " + tabla + " ADD COLUMN " + columna + " " + definicion);
         }
     }
 

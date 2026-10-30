@@ -46,510 +46,508 @@ import java.util.Set;
  */
 final class CentralFrame extends JFrame {
 
-    private static final Color AVAILABLE = new Color(0x2E7D32);
-    private static final Color WATERING_A = new Color(0x1B5E20);
-    private static final Color WATERING_B = new Color(0x4CAF50);
-    private static final Color LEAK = new Color(0xC62828);
-    private static final Color OUT_OF_SERVICE = new Color(0xEF6C00);
-    private static final Color DISCONNECTED = new Color(0x616161);
-    private static final Color UNKNOWN = new Color(0x424242);
+    private static final Color VERDE = new Color(0x2E7D32);
+    private static final Color RIEGO_A = new Color(0x1B5E20);
+    private static final Color RIEGO_B = new Color(0x4CAF50);
+    private static final Color ROJO = new Color(0xC62828);
+    private static final Color NARANJA = new Color(0xEF6C00);
+    private static final Color GRIS = new Color(0x616161);
+    private static final Color DESCONOCIDO = new Color(0x424242);
 
-    private static final Color BACKGROUND = new Color(0x1E1E1E);
-    private static final Color PANEL_BACKGROUND = new Color(0x252526);
-    private static final Color TEXT = new Color(0xF2F2F2);
-    private static final Color MUTED = new Color(0xBBBBBB);
+    private static final Color FONDO = new Color(0x1E1E1E);
+    private static final Color FONDO_PANEL = new Color(0x252526);
+    private static final Color TEXTO = new Color(0xF2F2F2);
+    private static final Color ATENUADO = new Color(0xBBBBBB);
 
     private final CentralService central;
-    private final JPanel stationsPanel = new JPanel();
-    private final Map<Integer, StationCard> cards = new LinkedHashMap<>();
-    private final JLabel summaryLabel = new JLabel(" ");
-    private final JLabel statusLabel = new JLabel("Listo.");
-    private final JLabel emptyLabel = new JLabel("No hay estaciones WS registradas.", SwingConstants.CENTER);
+    private final JPanel panelEstaciones = new JPanel();
+    private final Map<Integer, TarjetaEstacion> tarjetas = new LinkedHashMap<>();
+    private final JLabel etiquetaResumen = new JLabel(" ");
+    private final JLabel etiquetaEstado = new JLabel("Listo.");
+    private final JLabel etiquetaVacia = new JLabel("No hay estaciones WS registradas.", SwingConstants.CENTER);
 
-    private final JTextField operatorIdField = new JTextField(6);
-    private final JTextField operatorNameField = new JTextField(14);
-    private final JTextField irrigationWsField = new JTextField("0", 6);
-    private final JTextField irrigationDurationField = new JTextField("10", 6);
-    private final JTextField controlWsField = new JTextField("0", 6);
+    private final JTextField campoIdOperario = new JTextField(6);
+    private final JTextField campoNombreOperario = new JTextField(14);
+    private final JTextField campoWsRiego = new JTextField("0", 6);
+    private final JTextField campoDuracionRiego = new JTextField("10", 6);
+    private final JTextField campoWsControl = new JTextField("0", 6);
 
-    private boolean blinkOn;
-    private boolean emptyShown;
+    private boolean parpadeo;
+    private boolean vaciaMostrada;
 
-    CentralFrame(CentralService central, int socketPort, String kafkaHost, int kafkaPort, String dbPath) {
+    CentralFrame(CentralService central, int puertoSocket, String anfitrionKafka, int puertoKafka, String rutaBd) {
         super("WM_Central - Panel de estaciones");
         this.central = central;
 
         setDefaultCloseOperation(DO_NOTHING_ON_CLOSE);
         addWindowListener(new WindowAdapter() {
             @Override public void windowClosing(WindowEvent e) {
-                int option = JOptionPane.showConfirmDialog(CentralFrame.this,
+                int opcion = JOptionPane.showConfirmDialog(CentralFrame.this,
                         "¿Cerrar WM_Central? Se detendrá el servicio de la central.",
                         "Cerrar WM_Central", JOptionPane.YES_NO_OPTION);
-                if (option == JOptionPane.YES_OPTION) {
+                if (opcion == JOptionPane.YES_OPTION) {
                     dispose();
                     System.exit(0);
                 }
             }
         });
 
-        getContentPane().setBackground(BACKGROUND);
+        getContentPane().setBackground(FONDO);
         setLayout(new BorderLayout());
 
-        add(header(socketPort, kafkaHost, kafkaPort, dbPath), BorderLayout.NORTH);
-        add(centerPanel(), BorderLayout.CENTER);
-        add(adminPanel(), BorderLayout.EAST);
-        add(southPanel(), BorderLayout.SOUTH);
+        add(cabecera(puertoSocket, anfitrionKafka, puertoKafka, rutaBd), BorderLayout.NORTH);
+        add(panelCentral(), BorderLayout.CENTER);
+        add(panelAdmin(), BorderLayout.EAST);
+        add(panelSur(), BorderLayout.SOUTH);
 
-        emptyLabel.setForeground(MUTED);
-        emptyLabel.setFont(new Font("SansSerif", Font.PLAIN, 15));
+        etiquetaVacia.setForeground(ATENUADO);
+        etiquetaVacia.setFont(new Font("SansSerif", Font.PLAIN, 15));
 
-        Rectangle screen = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
-        setSize(Math.min(1180, Math.max(900, screen.width - 40)),
-                Math.min(760, Math.max(520, screen.height - 40)));
+        Rectangle pantalla = GraphicsEnvironment.getLocalGraphicsEnvironment().getMaximumWindowBounds();
+        setSize(Math.min(1180, Math.max(900, pantalla.width - 40)),
+                Math.min(760, Math.max(520, pantalla.height - 40)));
         setMinimumSize(new Dimension(860, 500));
         setLocationRelativeTo(null);
 
-        refresh();
-        new Timer(1000, e -> refresh()).start();
+        refrescar();
+        new Timer(1000, e -> refrescar()).start();
         new Timer(500, e -> {
-            blinkOn = !blinkOn;
-            for (StationCard card : cards.values()) card.paintState(blinkOn);
+            parpadeo = !parpadeo;
+            for (TarjetaEstacion tarjeta : tarjetas.values()) tarjeta.pintarEstado(parpadeo);
         }).start();
     }
 
     // ------------------------------------------------------------------ Layout
 
-    private JComponent header(int socketPort, String kafkaHost, int kafkaPort, String dbPath) {
+    private JComponent cabecera(int puertoSocket, String anfitrionKafka, int puertoKafka, String rutaBd) {
         JPanel panel = new JPanel(new BorderLayout(16, 0));
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(12, 18, 12, 18));
 
-        JLabel title = new JLabel("WM_Central");
-        title.setFont(new Font("SansSerif", Font.BOLD, 24));
-        title.setForeground(TEXT);
+        JLabel titulo = new JLabel("WM_Central");
+        titulo.setFont(new Font("SansSerif", Font.BOLD, 24));
+        titulo.setForeground(TEXTO);
 
-        JLabel subtitle = new JLabel("Socket " + socketPort + "  ·  Kafka " + kafkaHost + ":" + kafkaPort
-                + "  ·  SQLite " + dbPath);
-        subtitle.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        subtitle.setForeground(MUTED);
+        JLabel subtitulo = new JLabel("Socket " + puertoSocket + "  ·  Kafka " + anfitrionKafka + ":" + puertoKafka
+                + "  ·  SQLite " + rutaBd);
+        subtitulo.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        subtitulo.setForeground(ATENUADO);
 
-        JPanel left = new JPanel();
-        left.setOpaque(false);
-        left.setLayout(new BoxLayout(left, BoxLayout.Y_AXIS));
-        left.add(title);
-        left.add(Box.createVerticalStrut(3));
-        left.add(subtitle);
+        JPanel izquierda = new JPanel();
+        izquierda.setOpaque(false);
+        izquierda.setLayout(new BoxLayout(izquierda, BoxLayout.Y_AXIS));
+        izquierda.add(titulo);
+        izquierda.add(Box.createVerticalStrut(3));
+        izquierda.add(subtitulo);
 
-        summaryLabel.setFont(new Font("SansSerif", Font.BOLD, 14));
-        summaryLabel.setForeground(TEXT);
-        summaryLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+        etiquetaResumen.setFont(new Font("SansSerif", Font.BOLD, 14));
+        etiquetaResumen.setForeground(TEXTO);
+        etiquetaResumen.setHorizontalAlignment(SwingConstants.RIGHT);
 
-        panel.add(left, BorderLayout.WEST);
-        panel.add(summaryLabel, BorderLayout.EAST);
+        panel.add(izquierda, BorderLayout.WEST);
+        panel.add(etiquetaResumen, BorderLayout.EAST);
         return panel;
     }
 
-    private JComponent centerPanel() {
-        stationsPanel.setLayout(new GridLayout(0, 3, 14, 14));
-        stationsPanel.setBackground(BACKGROUND);
-        stationsPanel.setBorder(new EmptyBorder(14, 14, 14, 14));
+    private JComponent panelCentral() {
+        panelEstaciones.setLayout(new GridLayout(0, 3, 14, 14));
+        panelEstaciones.setBackground(FONDO);
+        panelEstaciones.setBorder(new EmptyBorder(14, 14, 14, 14));
 
-        JScrollPane scroll = new JScrollPane(stationsPanel);
-        scroll.setBorder(BorderFactory.createEmptyBorder());
-        scroll.getViewport().setBackground(BACKGROUND);
-        scroll.getVerticalScrollBar().setUnitIncrement(18);
-        return scroll;
+        JScrollPane desplazamiento = new JScrollPane(panelEstaciones);
+        desplazamiento.setBorder(BorderFactory.createEmptyBorder());
+        desplazamiento.getViewport().setBackground(FONDO);
+        desplazamiento.getVerticalScrollBar().setUnitIncrement(18);
+        return desplazamiento;
     }
 
-    private JComponent adminPanel() {
+    private JComponent panelAdmin() {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(12, 12, 12, 12));
         panel.setPreferredSize(new Dimension(340, 0));
 
-        JButton registerButton = new JButton("Registrar operario");
-        registerButton.addActionListener(e -> registerOperator());
-        JButton listOperatorsButton = new JButton("Ver operarios");
-        listOperatorsButton.addActionListener(e -> showOperators());
+        JButton botonRegistrar = new JButton("Registrar operario");
+        botonRegistrar.addActionListener(e -> registrarOperario());
+        JButton botonVerOperarios = new JButton("Ver operarios");
+        botonVerOperarios.addActionListener(e -> mostrarOperarios());
 
-        JPanel operatorForm = form(
-                label("ID:"), operatorIdField,
-                label("Nombre:"), operatorNameField);
-        JPanel operatorButtons = buttons(registerButton, listOperatorsButton);
-        panel.add(section("Operarios", operatorForm, operatorButtons));
+        JPanel formularioOperarios = formulario(
+                etiqueta("ID:"), campoIdOperario,
+                etiqueta("Nombre:"), campoNombreOperario);
+        JPanel botonesOperarios = botones(botonRegistrar, botonVerOperarios);
+        panel.add(seccion("Operarios", formularioOperarios, botonesOperarios));
         panel.add(Box.createVerticalStrut(10));
 
-        JButton irrigateButton = new JButton("Iniciar riego");
-        irrigateButton.addActionListener(e -> startIrrigation());
-        JPanel irrigationForm = form(
-                label("WS (0 = todas):"), irrigationWsField,
-                label("Duración (s):"), irrigationDurationField);
-        panel.add(section("Riego administrativo", irrigationForm, buttons(irrigateButton)));
+        JButton botonRegar = new JButton("Iniciar riego");
+        botonRegar.addActionListener(e -> iniciarRiego());
+        JPanel formularioRiego = formulario(
+                etiqueta("WS (0 = todas):"), campoWsRiego,
+                etiqueta("Duración (s):"), campoDuracionRiego);
+        panel.add(seccion("Riego administrativo", formularioRiego, botones(botonRegar)));
         panel.add(Box.createVerticalStrut(10));
 
-        JButton blockButton = new JButton("Bloquear");
-        blockButton.addActionListener(e -> sendControl("BLOCK_WS", "bloqueo"));
-        JButton activateButton = new JButton("Activar");
-        activateButton.addActionListener(e -> sendControl("ACTIVATE_WS", "activación"));
-        JButton stopButton = new JButton("Parar riego");
-        stopButton.addActionListener(e -> sendControl("STOP_IRRIGATION", "parada"));
-        JPanel controlForm = form(label("WS (0 = todas):"), controlWsField);
-        panel.add(section("Control de estaciones", controlForm,
-                buttons(blockButton, activateButton, stopButton)));
+        JButton botonBloquear = new JButton("Bloquear");
+        botonBloquear.addActionListener(e -> enviarControl("BLOCK_WS", "bloqueo"));
+        JButton botonActivar = new JButton("Activar");
+        botonActivar.addActionListener(e -> enviarControl("ACTIVATE_WS", "activación"));
+        JButton botonParar = new JButton("Parar riego");
+        botonParar.addActionListener(e -> enviarControl("STOP_IRRIGATION", "parada"));
+        JPanel formularioControl = formulario(etiqueta("WS (0 = todas):"), campoWsControl);
+        panel.add(seccion("Control de estaciones", formularioControl,
+                botones(botonBloquear, botonActivar, botonParar)));
         panel.add(Box.createVerticalStrut(10));
 
-        JButton refreshButton = new JButton("Actualizar panel");
-        refreshButton.addActionListener(e -> {
-            refreshNow();
-            status("Panel actualizado.");
+        JButton botonActualizar = new JButton("Actualizar panel");
+        botonActualizar.addActionListener(e -> {
+            refrescarAhora();
+            estado("Panel actualizado.");
         });
-        panel.add(section("Vista", buttons(refreshButton)));
+        panel.add(seccion("Vista", botones(botonActualizar)));
 
         panel.add(Box.createVerticalGlue());
-        JLabel hint = new JLabel("<html><div style='width:280px'>Las órdenes se entregan a la "
+        JLabel sugerencia = new JLabel("<html><div style='width:280px'>Las órdenes se entregan a la "
                 + "estación en la siguiente comprobación de estado (1 s).</div></html>");
-        hint.setForeground(MUTED);
-        hint.setFont(new Font("SansSerif", Font.PLAIN, 11));
-        hint.setAlignmentX(Component.LEFT_ALIGNMENT);
-        panel.add(hint);
+        sugerencia.setForeground(ATENUADO);
+        sugerencia.setFont(new Font("SansSerif", Font.PLAIN, 11));
+        sugerencia.setAlignmentX(Component.LEFT_ALIGNMENT);
+        panel.add(sugerencia);
         return panel;
     }
 
-    private JComponent southPanel() {
+    private JComponent panelSur() {
         JPanel panel = new JPanel(new BorderLayout());
-        panel.setBackground(PANEL_BACKGROUND);
+        panel.setBackground(FONDO_PANEL);
         panel.setBorder(new EmptyBorder(2, 10, 4, 10));
-        panel.add(legend(), BorderLayout.NORTH);
+        panel.add(leyenda(), BorderLayout.NORTH);
 
-        statusLabel.setForeground(MUTED);
-        statusLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        statusLabel.setBorder(new EmptyBorder(0, 6, 4, 6));
-        panel.add(statusLabel, BorderLayout.SOUTH);
+        etiquetaEstado.setForeground(ATENUADO);
+        etiquetaEstado.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        etiquetaEstado.setBorder(new EmptyBorder(0, 6, 4, 6));
+        panel.add(etiquetaEstado, BorderLayout.SOUTH);
         return panel;
     }
 
-    private JComponent legend() {
+    private JComponent leyenda() {
         JPanel panel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 4));
         panel.setOpaque(false);
-        panel.add(chip("Available", AVAILABLE));
-        panel.add(chip("Watering", WATERING_A));
-        panel.add(chip("Leak", LEAK));
-        panel.add(chip("Out of Service", OUT_OF_SERVICE));
-        panel.add(chip("Disconnected", DISCONNECTED));
+        panel.add(distintivo("Available", VERDE));
+        panel.add(distintivo("Watering", RIEGO_A));
+        panel.add(distintivo("Leak", ROJO));
+        panel.add(distintivo("Out of Service", NARANJA));
+        panel.add(distintivo("Disconnected", GRIS));
         return panel;
     }
 
-    private JComponent chip(String text, Color color) {
-        JLabel label = new JLabel(" " + text + " ");
-        label.setOpaque(true);
-        label.setBackground(color);
-        label.setForeground(Color.WHITE);
-        label.setFont(new Font("SansSerif", Font.BOLD, 11));
-        label.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
-        return label;
+    private JComponent distintivo(String texto, Color color) {
+        JLabel etiqueta = new JLabel(" " + texto + " ");
+        etiqueta.setOpaque(true);
+        etiqueta.setBackground(color);
+        etiqueta.setForeground(Color.WHITE);
+        etiqueta.setFont(new Font("SansSerif", Font.BOLD, 11));
+        etiqueta.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6));
+        return etiqueta;
     }
 
-    private JPanel section(String title, JComponent... contents) {
+    private JPanel seccion(String titulo, JComponent... contenidos) {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
         panel.setOpaque(false);
         panel.setAlignmentX(Component.LEFT_ALIGNMENT);
         panel.setBorder(BorderFactory.createTitledBorder(
-                BorderFactory.createLineBorder(new Color(0x505050)), title,
+                BorderFactory.createLineBorder(new Color(0x505050)), titulo,
                 javax.swing.border.TitledBorder.LEFT, javax.swing.border.TitledBorder.TOP,
-                new Font("SansSerif", Font.BOLD, 12), TEXT));
-        for (JComponent content : contents) {
-            content.setAlignmentX(Component.LEFT_ALIGNMENT);
-            panel.add(content);
+                new Font("SansSerif", Font.BOLD, 12), TEXTO));
+        for (JComponent contenido : contenidos) {
+            contenido.setAlignmentX(Component.LEFT_ALIGNMENT);
+            panel.add(contenido);
             panel.add(Box.createVerticalStrut(5));
         }
         panel.setMaximumSize(new Dimension(Integer.MAX_VALUE, panel.getPreferredSize().height));
         return panel;
     }
 
-    private JPanel form(JComponent... pairs) {
+    private JPanel formulario(JComponent... pares) {
         JPanel panel = new JPanel(new GridLayout(0, 2, 6, 4));
         panel.setOpaque(false);
-        for (JComponent component : pairs) panel.add(component);
+        for (JComponent componente : pares) panel.add(componente);
         return panel;
     }
 
-    private JPanel buttons(JButton... buttons) {
+    private JPanel botones(JButton... botones) {
         JPanel panel = new JPanel(new GridLayout(1, 0, 6, 0));
         panel.setOpaque(false);
-        for (JButton button : buttons) panel.add(button);
+        for (JButton boton : botones) panel.add(boton);
         return panel;
     }
 
-    private JLabel label(String text) {
-        JLabel label = new JLabel(text);
-        label.setForeground(TEXT);
-        label.setFont(new Font("SansSerif", Font.PLAIN, 12));
-        return label;
+    private JLabel etiqueta(String texto) {
+        JLabel etiqueta = new JLabel(texto);
+        etiqueta.setForeground(TEXTO);
+        etiqueta.setFont(new Font("SansSerif", Font.PLAIN, 12));
+        return etiqueta;
     }
 
     // ------------------------------------------------------------------ Refresco
 
-    private void refreshNow() {
-        refresh();
+    private void refrescarAhora() {
+        refrescar();
     }
 
-    private void refresh() {
+    private void refrescar() {
         if (!SwingUtilities.isEventDispatchThread()) {
-            SwingUtilities.invokeLater(this::refresh);
+            SwingUtilities.invokeLater(this::refrescar);
             return;
         }
 
-        List<CentralService.StationView> stations = central.vistaEstaciones();
-        Set<Integer> seen = new HashSet<>();
-        int online = 0;
-        int watering = 0;
+        List<CentralService.VistaEstacion> estaciones = central.vistaEstaciones();
+        Set<Integer> vistos = new HashSet<>();
+        int enLinea = 0;
+        int regando = 0;
 
-        for (CentralService.StationView station : stations) {
-            seen.add(station.wsId);
-            if (station.online) online++;
-            if ("REGANDO".equalsIgnoreCase(station.state)) watering++;
+        for (CentralService.VistaEstacion estacion : estaciones) {
+            vistos.add(estacion.idWs);
+            if (estacion.enLinea) enLinea++;
+            if ("REGANDO".equalsIgnoreCase(estacion.estado)) regando++;
 
-            StationCard card = cards.get(station.wsId);
-            if (card == null) {
-                card = new StationCard();
-                cards.put(station.wsId, card);
-                stationsPanel.add(card);
+            TarjetaEstacion tarjeta = tarjetas.get(estacion.idWs);
+            if (tarjeta == null) {
+                tarjeta = new TarjetaEstacion();
+                tarjetas.put(estacion.idWs, tarjeta);
+                panelEstaciones.add(tarjeta);
             }
-            card.apply(station);
-            card.paintState(blinkOn);
+            tarjeta.aplicar(estacion);
+            tarjeta.pintarEstado(parpadeo);
         }
 
-        for (Integer id : new ArrayList<>(cards.keySet())) {
-            if (!seen.contains(id)) stationsPanel.remove(cards.remove(id));
+        for (Integer id : new ArrayList<>(tarjetas.keySet())) {
+            if (!vistos.contains(id)) panelEstaciones.remove(tarjetas.remove(id));
         }
 
-        if (stations.isEmpty()) {
-            if (!emptyShown) {
-                stationsPanel.add(emptyLabel);
-                emptyShown = true;
+        if (estaciones.isEmpty()) {
+            if (!vaciaMostrada) {
+                panelEstaciones.add(etiquetaVacia);
+                vaciaMostrada = true;
             }
-        } else if (emptyShown) {
-            stationsPanel.remove(emptyLabel);
-            emptyShown = false;
+        } else if (vaciaMostrada) {
+            panelEstaciones.remove(etiquetaVacia);
+            vaciaMostrada = false;
         }
 
-        summaryLabel.setText(stations.size() + " estaciones  ·  " + online + " en línea  ·  "
-                + watering + " regando");
-        stationsPanel.revalidate();
-        stationsPanel.repaint();
+        etiquetaResumen.setText(estaciones.size() + " estaciones  ·  " + enLinea + " en línea  ·  "
+                + regando + " regando");
+        panelEstaciones.revalidate();
+        panelEstaciones.repaint();
     }
 
     // ------------------------------------------------------------------ Acciones
 
-    private void registerOperator() {
-        int id = readInteger(operatorIdField, "ID de operario", true);
+    private void registrarOperario() {
+        int id = leerEntero(campoIdOperario, "ID de operario", true);
         if (id < 0) return;
-        String name = operatorNameField.getText().trim();
-        if (name.isEmpty()) {
+        String nombre = campoNombreOperario.getText().trim();
+        if (nombre.isEmpty()) {
             error("Introduce el nombre del operario.");
             return;
         }
-        boolean created = central.registrarOperario(id, name);
-        if (created) {
-            operatorNameField.setText("");
-            status("Operario " + id + " registrado.");
+        boolean creado = central.registrarOperario(id, nombre);
+        if (creado) {
+            campoNombreOperario.setText("");
+            estado("Operario " + id + " registrado.");
         } else {
             error("No se pudo registrar el operario (¿ID duplicado?).");
         }
     }
 
-    private void showOperators() {
-        List<Map<String, Object>> operators = central.listarOperarios();
-        DefaultTableModel model = new DefaultTableModel(new Object[]{"ID", "Nombre"}, 0) {
-            @Override public boolean isCellEditable(int row, int column) { return false; }
+    private void mostrarOperarios() {
+        List<Map<String, Object>> operarios = central.listarOperarios();
+        DefaultTableModel modelo = new DefaultTableModel(new Object[]{"ID", "Nombre"}, 0) {
+            @Override public boolean isCellEditable(int fila, int columna) { return false; }
         };
-        for (Map<String, Object> operator : operators) {
-            model.addRow(new Object[]{operator.get("operatorId"), operator.get("name")});
+        for (Map<String, Object> operario : operarios) {
+            modelo.addRow(new Object[]{operario.get("operatorId"), operario.get("name")});
         }
-        JTable table = new JTable(model);
-        table.setRowHeight(24);
-        JScrollPane scroll = new JScrollPane(table);
-        scroll.setPreferredSize(new Dimension(340, Math.max(180, Math.min(420, 40 + operators.size() * 26))));
+        JTable tabla = new JTable(modelo);
+        tabla.setRowHeight(24);
+        JScrollPane desplazamiento = new JScrollPane(tabla);
+        desplazamiento.setPreferredSize(new Dimension(340, Math.max(180, Math.min(420, 40 + operarios.size() * 26))));
 
-        JDialog dialog = new JDialog(this, "Operarios registrados", true);
-        dialog.setLayout(new BorderLayout());
-        dialog.add(scroll, BorderLayout.CENTER);
-        JButton close = new JButton("Cerrar");
-        close.addActionListener(e -> dialog.dispose());
-        JPanel footer = new JPanel(new FlowLayout(FlowLayout.RIGHT));
-        footer.add(close);
-        dialog.add(footer, BorderLayout.SOUTH);
-        dialog.pack();
-        dialog.setLocationRelativeTo(this);
-        dialog.setVisible(true);
+        JDialog dialogo = new JDialog(this, "Operarios registrados", true);
+        dialogo.setLayout(new BorderLayout());
+        dialogo.add(desplazamiento, BorderLayout.CENTER);
+        JButton cerrar = new JButton("Cerrar");
+        cerrar.addActionListener(e -> dialogo.dispose());
+        JPanel pie = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        pie.add(cerrar);
+        dialogo.add(pie, BorderLayout.SOUTH);
+        dialogo.pack();
+        dialogo.setLocationRelativeTo(this);
+        dialogo.setVisible(true);
     }
 
-    private void startIrrigation() {
-        int wsId = readInteger(irrigationWsField, "ID de WS", false);
-        if (wsId < 0) return;
-        int duration = readInteger(irrigationDurationField, "Duración", true);
-        if (duration < 0) return;
-        if (duration > 86400) {
+    private void iniciarRiego() {
+        int idWs = leerEntero(campoWsRiego, "ID de WS", false);
+        if (idWs < 0) return;
+        int duracion = leerEntero(campoDuracionRiego, "Duración", true);
+        if (duracion < 0) return;
+        if (duracion > 86400) {
             error("La duración máxima es 86400 segundos.");
             return;
         }
-        boolean queued = central.adminRiego(wsId, duration);
-        if (queued) status("Riego encolado para " + (wsId == 0 ? "todas las estaciones conectadas" : "WS " + wsId)
-                + " (" + duration + " s).");
+        boolean encolado = central.adminRiego(idWs, duracion);
+        if (encolado) estado("Riego encolado para " + (idWs == 0 ? "todas las estaciones conectadas" : "WS " + idWs)
+                + " (" + duracion + " s).");
         else error("No se pudo iniciar el riego: la estación no está conectada y disponible.");
-        refreshNow();
+        refrescarAhora();
     }
 
-    private void sendControl(String type, String description) {
-        int wsId = readInteger(controlWsField, "ID de WS", false);
-        if (wsId < 0) return;
-        boolean queued = central.adminOrden(type, wsId);
-        if (queued) status("Orden de " + description + " encolada para "
-                + (wsId == 0 ? "todas las estaciones conectadas" : "WS " + wsId) + ".");
+    private void enviarControl(String tipo, String descripcion) {
+        int idWs = leerEntero(campoWsControl, "ID de WS", false);
+        if (idWs < 0) return;
+        boolean encolado = central.adminOrden(tipo, idWs);
+        if (encolado) estado("Orden de " + descripcion + " encolada para "
+                + (idWs == 0 ? "todas las estaciones conectadas" : "WS " + idWs) + ".");
         else error("No hay estaciones conectadas con estado reciente para esa orden.");
-        refreshNow();
+        refrescarAhora();
     }
 
-    private int readInteger(JTextField field, String name, boolean positive) {
+    private int leerEntero(JTextField campo, String nombre, boolean positivo) {
         try {
-            int value = Integer.parseInt(field.getText().trim());
-            if (positive ? value > 0 : value >= 0) return value;
-        } catch (NumberFormatException ignored) {
+            int valor = Integer.parseInt(campo.getText().trim());
+            if (positivo ? valor > 0 : valor >= 0) return valor;
+        } catch (NumberFormatException ignorada) {
             // Se informa abajo con un mensaje uniforme.
         }
-        error(name + ": introduce un entero " + (positive ? "positivo." : "mayor o igual que cero."));
+        error(nombre + ": introduce un entero " + (positivo ? "positivo." : "mayor o igual que cero."));
         return -1;
     }
 
-    private void status(String message) {
-        statusLabel.setText(message);
+    private void estado(String mensaje) {
+        etiquetaEstado.setText(mensaje);
     }
 
-    private void error(String message) {
-        statusLabel.setText(message);
-        JOptionPane.showMessageDialog(this, message, "WM_Central", JOptionPane.WARNING_MESSAGE);
+    private void error(String mensaje) {
+        etiquetaEstado.setText(mensaje);
+        JOptionPane.showMessageDialog(this, mensaje, "WM_Central", JOptionPane.WARNING_MESSAGE);
     }
 
     // ------------------------------------------------------------------ Tarjeta
 
-    private static final class StationCard extends JPanel {
-        private final JLabel idLabel = new JLabel();
-        private final JLabel locationLabel = new JLabel();
-        private final JLabel stateLabel = new JLabel();
-        private final JLabel volumeLabel = new JLabel();
-        private final JLabel detail1 = new JLabel(" ");
-        private final JLabel detail2 = new JLabel(" ");
-        private final JLabel detail3 = new JLabel(" ");
-        private String state = "DESCONECTADA";
-        private String requestId;
+    private static final class TarjetaEstacion extends JPanel {
+        private final JLabel etiquetaId = new JLabel();
+        private final JLabel etiquetaUbicacion = new JLabel();
+        private final JLabel etiquetaEstado = new JLabel();
+        private final JLabel etiquetaVolumen = new JLabel();
+        private final JLabel detalle1 = new JLabel(" ");
+        private final JLabel detalle2 = new JLabel(" ");
+        private final JLabel detalle3 = new JLabel(" ");
+        private String estado = "DESCONECTADA";
 
-        StationCard() {
+        TarjetaEstacion() {
             super(new BorderLayout(0, 7));
             setOpaque(true);
             setBorder(BorderFactory.createCompoundBorder(
                     BorderFactory.createLineBorder(new Color(0, 0, 0, 90), 1, true),
                     new EmptyBorder(14, 16, 14, 16)));
 
-            idLabel.setFont(new Font("SansSerif", Font.BOLD, 16));
-            locationLabel.setFont(new Font("SansSerif", Font.PLAIN, 12));
-            stateLabel.setFont(new Font("SansSerif", Font.BOLD, 23));
-            volumeLabel.setFont(new Font("SansSerif", Font.BOLD, 13));
-            Font detailFont = new Font("SansSerif", Font.PLAIN, 12);
-            detail1.setFont(detailFont);
-            detail2.setFont(detailFont);
-            detail3.setFont(detailFont);
+            etiquetaId.setFont(new Font("SansSerif", Font.BOLD, 16));
+            etiquetaUbicacion.setFont(new Font("SansSerif", Font.PLAIN, 12));
+            etiquetaEstado.setFont(new Font("SansSerif", Font.BOLD, 23));
+            etiquetaVolumen.setFont(new Font("SansSerif", Font.BOLD, 13));
+            Font fuenteDetalle = new Font("SansSerif", Font.PLAIN, 12);
+            detalle1.setFont(fuenteDetalle);
+            detalle2.setFont(fuenteDetalle);
+            detalle3.setFont(fuenteDetalle);
 
-            for (JLabel label : new JLabel[]{idLabel, locationLabel, stateLabel, volumeLabel,
-                    detail1, detail2, detail3}) {
-                label.setForeground(Color.WHITE);
+            for (JLabel etiqueta : new JLabel[]{etiquetaId, etiquetaUbicacion, etiquetaEstado, etiquetaVolumen,
+                    detalle1, detalle2, detalle3}) {
+                etiqueta.setForeground(Color.WHITE);
             }
-            locationLabel.setHorizontalAlignment(SwingConstants.RIGHT);
+            etiquetaUbicacion.setHorizontalAlignment(SwingConstants.RIGHT);
 
-            JPanel top = new JPanel(new BorderLayout(8, 0));
-            top.setOpaque(false);
-            top.add(idLabel, BorderLayout.WEST);
-            top.add(locationLabel, BorderLayout.CENTER);
+            JPanel superior = new JPanel(new BorderLayout(8, 0));
+            superior.setOpaque(false);
+            superior.add(etiquetaId, BorderLayout.WEST);
+            superior.add(etiquetaUbicacion, BorderLayout.CENTER);
 
-            JPanel middle = new JPanel(new BorderLayout(0, 2));
-            middle.setOpaque(false);
-            middle.add(stateLabel, BorderLayout.NORTH);
-            middle.add(volumeLabel, BorderLayout.SOUTH);
+            JPanel medio = new JPanel(new BorderLayout(0, 2));
+            medio.setOpaque(false);
+            medio.add(etiquetaEstado, BorderLayout.NORTH);
+            medio.add(etiquetaVolumen, BorderLayout.SOUTH);
 
-            JPanel details = new JPanel(new GridLayout(0, 1, 0, 1));
-            details.setOpaque(false);
-            details.add(detail1);
-            details.add(detail2);
-            details.add(detail3);
+            JPanel detalles = new JPanel(new GridLayout(0, 1, 0, 1));
+            detalles.setOpaque(false);
+            detalles.add(detalle1);
+            detalles.add(detalle2);
+            detalles.add(detalle3);
 
-            add(top, BorderLayout.NORTH);
-            add(middle, BorderLayout.CENTER);
-            add(details, BorderLayout.SOUTH);
+            add(superior, BorderLayout.NORTH);
+            add(medio, BorderLayout.CENTER);
+            add(detalles, BorderLayout.SOUTH);
         }
 
-        void apply(CentralService.StationView station) {
-            idLabel.setText("WS " + station.wsId);
-            locationLabel.setText(station.location == null ? "" : station.location);
-            locationLabel.setToolTipText(station.location);
-            state = station.state == null ? "DESCONECTADA" : station.state.toUpperCase(Locale.ROOT);
-            stateLabel.setText(displayState(state));
-            volumeLabel.setText(String.format(Locale.ROOT, "Volumen acumulado: %.2f L", station.volumeLitres));
+        void aplicar(CentralService.VistaEstacion estacion) {
+            etiquetaId.setText("WS " + estacion.idWs);
+            etiquetaUbicacion.setText(estacion.ubicacion == null ? "" : estacion.ubicacion);
+            etiquetaUbicacion.setToolTipText(estacion.ubicacion);
+            estado = estacion.estado == null ? "DESCONECTADA" : estacion.estado.toUpperCase(Locale.ROOT);
+            etiquetaEstado.setText(etiquetaEstado(estado));
+            etiquetaVolumen.setText(String.format(Locale.ROOT, "Volumen acumulado: %.2f L", estacion.litros));
 
-            switch (state) {
+            switch (estado) {
                 case "REGANDO":
-                    detail1.setText(String.format(Locale.ROOT, "Caudal: %.2f L/min", station.flowLMin));
-                    detail2.setText(String.format(Locale.ROOT, "Servicio: %.2f L  ·  Tiempo: %d s",
-                            station.serviceLitres, station.elapsedSeconds));
-                    detail3.setText("Operario: " + (station.operatorId > 0 ? station.operatorId : "-"));
+                    detalle1.setText(String.format(Locale.ROOT, "Caudal: %.2f L/min", estacion.caudalLMin));
+                    detalle2.setText(String.format(Locale.ROOT, "Servicio: %.2f L  ·  Tiempo: %d s",
+                            estacion.litrosServicio, estacion.segundos));
+                    detalle3.setText("Operario: " + (estacion.idOperario > 0 ? estacion.idOperario : "-"));
                     break;
                 case "ACTIVADA":
-                    detail1.setText("Disponible para riego");
-                    detail2.setText(" ");
-                    detail3.setText(" ");
+                    detalle1.setText("Disponible para riego");
+                    detalle2.setText(" ");
+                    detalle3.setText(" ");
                     break;
                 case "FUGA":
-                    detail1.setText("Fuga/avería detectada");
-                    detail2.setText("Riego detenido");
-                    detail3.setText(" ");
+                    detalle1.setText("Fuga/avería detectada");
+                    detalle2.setText("Riego detenido");
+                    detalle3.setText(" ");
                     break;
                 case "FUERA_SERVICIO":
-                    detail1.setText("Estación bloqueada");
-                    detail2.setText("No acepta nuevos riegos");
-                    detail3.setText(" ");
+                    detalle1.setText("Estación bloqueada");
+                    detalle2.setText("No acepta nuevos riegos");
+                    detalle3.setText(" ");
                     break;
                 default:
-                    detail1.setText("Sin conexión con el monitor");
-                    detail2.setText(" ");
-                    detail3.setText(" ");
+                    detalle1.setText("Sin conexión con el monitor");
+                    detalle2.setText(" ");
+                    detalle3.setText(" ");
                     break;
             }
-            if (station.pendingControl != null) {
-                detail3.setText("Orden pendiente: " + station.pendingControl);
+            if (estacion.controlPendiente != null) {
+                detalle3.setText("Orden pendiente: " + estacion.controlPendiente);
             }
-            requestId = station.requestId;
-            setToolTipText(station.requestId == null ? null : "requestId: " + station.requestId);
+            setToolTipText(estacion.idSolicitud == null ? null : "requestId: " + estacion.idSolicitud);
         }
 
-        void paintState(boolean blinkOn) {
-            switch (state) {
-                case "ACTIVADA": setBackground(AVAILABLE); break;
-                case "REGANDO": setBackground(blinkOn ? WATERING_B : WATERING_A); break;
-                case "FUGA": setBackground(LEAK); break;
-                case "FUERA_SERVICIO": setBackground(OUT_OF_SERVICE); break;
-                case "DESCONECTADA": setBackground(DISCONNECTED); break;
-                default: setBackground(UNKNOWN); break;
+        void pintarEstado(boolean parpadeo) {
+            switch (estado) {
+                case "ACTIVADA": setBackground(VERDE); break;
+                case "REGANDO": setBackground(parpadeo ? RIEGO_B : RIEGO_A); break;
+                case "FUGA": setBackground(ROJO); break;
+                case "FUERA_SERVICIO": setBackground(NARANJA); break;
+                case "DESCONECTADA": setBackground(GRIS); break;
+                default: setBackground(DESCONOCIDO); break;
             }
         }
 
-        private static String displayState(String state) {
-            switch (state) {
+        private static String etiquetaEstado(String estado) {
+            switch (estado) {
                 case "ACTIVADA": return "Available";
                 case "REGANDO": return "Watering";
                 case "FUGA": return "Leak";
                 case "FUERA_SERVICIO": return "Out of Service";
                 case "DESCONECTADA": return "Disconnected";
-                default: return state;
+                default: return estado;
             }
         }
     }

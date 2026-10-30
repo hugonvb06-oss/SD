@@ -34,9 +34,9 @@ import javax.swing.SwingUtilities;
  */
 public final class WM_WS_E {
 
-    private static final long TICK_MS = 100L;
-    private static final long MONITOR_STALE_MS = 5_000L;
-    private static final long RECONNECT_MS = 2_000L;
+    private static final long TIC_MS = 100L;
+    private static final long MONITOR_OBSOLETO_MS = 5_000L;
+    private static final long RECONEXION_MS = 2_000L;
 
     private final String ipMonitor;
     private final int puertoMonitor;
@@ -45,13 +45,13 @@ public final class WM_WS_E {
     private final Object lock = new Object();
     private volatile boolean ejecutando = true;
 
-    private int wsId = -1;
+    private int idWs = -1;
     private String ubicacion = "";
     private double caudalNominal = 0;
 
     private volatile boolean monitorConectado;
     private volatile long ultimoPoll;
-    private volatile boolean ko;
+    private volatile boolean averia;
     private volatile boolean sinRespuesta;
     private volatile Socket socketActual;
 
@@ -133,7 +133,7 @@ public final class WM_WS_E {
             } finally {
                 perderMonitor("Monitor desconectado; la estación queda AVERIADA.");
             }
-            if (ejecutando) dormir(RECONNECT_MS);
+            if (ejecutando) dormir(RECONEXION_MS);
         }
         detener();
     }
@@ -148,7 +148,7 @@ public final class WM_WS_E {
             InputStream in = new BufferedInputStream(s.getInputStream());
             OutputStream out = new BufferedOutputStream(s.getOutputStream());
 
-            String identificacion = WireProtocol.readFrame(in);
+            String identificacion = WireProtocol.leerTrama(in);
             if (identificacion == null || !identificacion.startsWith("ID#")) {
                 throw new IOException("El monitor no envió la identificación esperada");
             }
@@ -161,9 +161,9 @@ public final class WM_WS_E {
             } catch (Exception e) {
                 throw new IOException("Identificación con valores no válidos");
             }
-            wsId = idRecibido;
+            idWs = idRecibido;
             ubicacion = URLDecoder.decode(datos[2], StandardCharsets.UTF_8.name());
-            WireProtocol.sendControl(out, WireProtocol.ACK);
+            WireProtocol.enviarControl(out, WireProtocol.ACK);
 
             if (!estadoCargado) cargarEstado();
             synchronized (lock) {
@@ -171,7 +171,7 @@ public final class WM_WS_E {
                 ultimoPoll = System.currentTimeMillis();
             }
             socketActual = s;
-            System.out.println("[MONITOR] Conectado. WS " + wsId + " (" + ubicacion + "), caudal "
+            System.out.println("[MONITOR] Conectado. WS " + idWs + " (" + ubicacion + "), caudal "
                     + fmt(caudalNominal) + " L/min. Agua acumulada: " + fmt(totalLitros) + " L.");
             imprimirEstado();
 
@@ -186,7 +186,7 @@ public final class WM_WS_E {
         while (ejecutando) {
             String trama;
             try {
-                trama = WireProtocol.readFrame(in);
+                trama = WireProtocol.leerTrama(in);
             } catch (SocketTimeoutException timeout) {
                 // Sin tráfico en este intervalo; el reloj comprueba la salud del enlace.
                 continue;
@@ -194,28 +194,28 @@ public final class WM_WS_E {
 
             if (trama.startsWith("POLL#")) {
                 String[] p = trama.split("#", -1);
-                boolean centralOnline = p.length > 1 && "1".equals(p[1]);
+                boolean centralConectada = p.length > 1 && "1".equals(p[1]);
                 String ackCentral = p.length > 2 ? p[2].trim() : "";
                 synchronized (lock) {
                     ultimoPoll = System.currentTimeMillis();
                     monitorConectado = true;
-                    if (!ackCentral.isEmpty() && pendiente != null && ackCentral.equals(pendiente.requestId)) {
+                    if (!ackCentral.isEmpty() && pendiente != null && ackCentral.equals(pendiente.idSolicitud)) {
                         System.out.println("[CENTRAL] Confirmado el estado final del servicio " + ackCentral + ".");
                         pendiente = null;
                         guardar();
                     }
                 }
                 if (sinRespuesta) continue; // motor "colgado": no envía estado
-                if (ko) {
-                    WireProtocol.sendFrame(out, "KO");
+                if (averia) {
+                    WireProtocol.enviarTrama(out, "KO");
                 } else {
-                    WireProtocol.sendFrame(out, construirEstado());
+                    WireProtocol.enviarTrama(out, construirEstado());
                 }
             } else if (trama.startsWith("CMD#")) {
-                WireProtocol.sendControl(out, WireProtocol.ACK);
+                WireProtocol.enviarControl(out, WireProtocol.ACK);
                 ejecutarComando(trama.substring(4));
             } else {
-                WireProtocol.sendControl(out, WireProtocol.NACK);
+                WireProtocol.enviarControl(out, WireProtocol.NACK);
             }
         }
     }
@@ -231,14 +231,14 @@ public final class WM_WS_E {
 
             if (activo != null) {
                 estado = "REGANDO";
-                req = activo.requestId;
+                req = activo.idSolicitud;
                 operario = activo.operario;
-                segundos = activo.elapsedSeconds();
+                segundos = activo.segundos();
                 caudal = caudalNominal;
             } else {
                 estado = bloqueada ? "FUERA_SERVICIO" : "ACTIVADA";
                 if (pendiente != null) {
-                    req = pendiente.requestId;
+                    req = pendiente.idSolicitud;
                     operario = pendiente.operario;
                     segundos = pendiente.segundos;
                 }
@@ -251,14 +251,14 @@ public final class WM_WS_E {
     private void ejecutarComando(String comando) {
         String[] p = comando.split("\\|", -1);
         String tipo = p.length > 0 ? p[0].trim() : "";
-        String requestId = p.length > 1 ? p[1].trim() : "";
+        String idSolicitud = p.length > 1 ? p[1].trim() : "";
         int operario = p.length > 2 ? entero(p[2], 0) : 0;
         int duracion = p.length > 3 ? entero(p[3], 0) : 0;
 
         synchronized (lock) {
             switch (tipo) {
                 case "START_IRRIGATION":
-                    iniciarRiego(requestId, operario, duracion);
+                    iniciarRiego(idSolicitud, operario, duracion);
                     break;
                 case "STOP_IRRIGATION":
                     if (activo != null) {
@@ -286,8 +286,8 @@ public final class WM_WS_E {
         imprimirEstado();
     }
 
-    private void iniciarRiego(String requestId, int operario, int duracion) {
-        if (ko || sinRespuesta) {
+    private void iniciarRiego(String idSolicitud, int operario, int duracion) {
+        if (averia || sinRespuesta) {
             System.out.println("[RIEGO] Rechazado: la estación está averiada.");
             return;
         }
@@ -307,9 +307,9 @@ public final class WM_WS_E {
             System.out.println("[RIEGO] Rechazado: duración no válida.");
             return;
         }
-        if (requestId.isEmpty()) requestId = "LOCAL-" + java.util.UUID.randomUUID();
-        activo = new Riego(requestId, operario, duracion);
-        System.out.println("[RIEGO] INICIADO " + requestId + " | Operario: " + operario
+        if (idSolicitud.isEmpty()) idSolicitud = "LOCAL-" + java.util.UUID.randomUUID();
+        activo = new Riego(idSolicitud, operario, duracion);
+        System.out.println("[RIEGO] INICIADO " + idSolicitud + " | Operario: " + operario
                 + " | Duración: " + duracion + " s | Caudal: " + fmt(caudalNominal) + " L/min");
         guardar();
     }
@@ -318,10 +318,10 @@ public final class WM_WS_E {
     private void finalizar(String motivo) {
         if (activo == null) return;
         Riego r = activo;
-        long segundos = r.elapsedSeconds();
-        pendiente = new Pendiente(r.requestId, r.operario, segundos, r.servicioLitros);
+        long segundos = r.segundos();
+        pendiente = new Pendiente(r.idSolicitud, r.operario, segundos, r.servicioLitros);
         activo = null;
-        System.out.println("[RIEGO] FINALIZADO (" + motivo + ") " + r.requestId
+        System.out.println("[RIEGO] FINALIZADO (" + motivo + ") " + r.idSolicitud
                 + " | Servicio: " + fmt(r.servicioLitros) + " L en " + segundos
                 + " s | Total acumulado: " + fmt(totalLitros) + " L");
         guardar();
@@ -339,15 +339,15 @@ public final class WM_WS_E {
 
                 boolean cerrarEnlace = false;
                 synchronized (lock) {
-                    if (activo != null && monitorConectado && !ko && !sinRespuesta) {
+                    if (activo != null && monitorConectado && !averia && !sinRespuesta) {
                         double incremento = caudalNominal / 60.0 * (dt / 1000.0);
                         activo.servicioLitros += incremento;
                         totalLitros += incremento;
-                        if (activo.elapsedSeconds() >= activo.duracion) {
+                        if (activo.segundos() >= activo.duracion) {
                             finalizar("Duración completada");
                         }
                     }
-                    if (monitorConectado && ahora - ultimoPoll > MONITOR_STALE_MS) {
+                    if (monitorConectado && ahora - ultimoPoll > MONITOR_OBSOLETO_MS) {
                         cerrarEnlace = true;
                     }
                     if (ahora - ultimoGuardado >= 1_000L && (activo != null || pendiente != null)) {
@@ -360,7 +360,7 @@ public final class WM_WS_E {
                     Socket s = socketActual;
                     if (s != null) try { s.close(); } catch (IOException ignored) { }
                 }
-                dormir(TICK_MS);
+                dormir(TIC_MS);
             }
         }, "wm-ws-engine-clock");
         reloj.setDaemon(true);
@@ -395,7 +395,7 @@ public final class WM_WS_E {
                 if (!in.hasNextLine()) return;
                 String opcion = in.nextLine().trim().toUpperCase(Locale.ROOT);
                 switch (opcion) {
-                    case "K": alternarKo(); break;
+                    case "K": alternarAveria(); break;
                     case "S": alternarSinRespuesta(); break;
                     case "E": imprimirEstado(); break;
                     case "Q":
@@ -409,10 +409,10 @@ public final class WM_WS_E {
         consola.start();
     }
 
-    public void alternarKo() {
+    public void alternarAveria() {
         synchronized (lock) {
-            ko = !ko;
-            if (ko) {
+            averia = !averia;
+            if (averia) {
                 sinRespuesta = false;
                 System.out.println(">>> AVERÍA SIMULADA (KO): el motor responderá KO al monitor.");
                 if (activo != null) finalizar("Avería simulada (KO)");
@@ -428,7 +428,7 @@ public final class WM_WS_E {
         synchronized (lock) {
             sinRespuesta = !sinRespuesta;
             if (sinRespuesta) {
-                ko = false;
+                averia = false;
                 System.out.println(">>> MOTOR SIN RESPUESTA: el monitor detectará la avería por timeout.");
                 if (activo != null) finalizar("Motor sin respuesta");
             } else {
@@ -440,49 +440,49 @@ public final class WM_WS_E {
     }
 
     /** Fotografía del motor para la interfaz gráfica. */
-    public EngineView vistaMotor() {
+    public VistaMotor vistaMotor() {
         synchronized (lock) {
             String estado;
-            if (ko || sinRespuesta || !monitorConectado) estado = "FUGA";
+            if (averia || sinRespuesta || !monitorConectado) estado = "FUGA";
             else if (activo != null) estado = "REGANDO";
             else if (bloqueada) estado = "FUERA_SERVICIO";
             else estado = "ACTIVADA";
 
             double servicio = activo != null ? activo.servicioLitros : 0;
-            long segundos = activo != null ? activo.elapsedSeconds() : 0;
+            long segundos = activo != null ? activo.segundos() : 0;
             int operario = activo != null ? activo.operario
                     : (pendiente != null ? pendiente.operario : 0);
-            String requestId = activo != null ? activo.requestId
-                    : (pendiente != null ? pendiente.requestId : null);
+            String idSolicitud = activo != null ? activo.idSolicitud
+                    : (pendiente != null ? pendiente.idSolicitud : null);
 
-            return new EngineView(wsId, ubicacion, caudalNominal, monitorConectado, ko,
+            return new VistaMotor(idWs, ubicacion, caudalNominal, monitorConectado, averia,
                     sinRespuesta, bloqueada, estado, totalLitros, servicio, segundos,
-                    operario, requestId, pendiente == null ? null : pendiente.requestId);
+                    operario, idSolicitud, pendiente == null ? null : pendiente.idSolicitud);
         }
     }
 
     private void imprimirEstado() {
         synchronized (lock) {
             String estado;
-            if (ko) estado = "AVERÍA KO (ROJO)";
+            if (averia) estado = "AVERÍA KO (ROJO)";
             else if (sinRespuesta) estado = "SIN RESPUESTA (ROJO)";
             else if (!monitorConectado) estado = "AVERIADA / MONITOR DESCONECTADO";
             else if (activo != null) estado = "Watering (REGANDO)";
             else if (bloqueada) estado = "Out of Service (NARANJA)";
             else estado = "Available (VERDE)";
-            System.out.println("[" + hora() + "] WS " + (wsId > 0 ? wsId : "?") + " | " + estado
+            System.out.println("[" + hora() + "] WS " + (idWs > 0 ? idWs : "?") + " | " + estado
                     + " | Agua total: " + fmt(totalLitros) + " L"
                     + (activo != null ? " | Servicio: " + fmt(activo.servicioLitros) + " L"
                     + " | Operario: " + activo.operario : "")
-                    + (pendiente != null ? " | Pendiente de reportar: " + pendiente.requestId : ""));
+                    + (pendiente != null ? " | Pendiente de reportar: " + pendiente.idSolicitud : ""));
         }
     }
 
     // ---------------------------------------------------------------- Persistencia
 
     private Path rutaEstado() {
-        if (wsId <= 0) return null;
-        return Paths.get(directorioEstado, "ws_" + wsId + ".state");
+        if (idWs <= 0) return null;
+        return Paths.get(directorioEstado, "ws_" + idWs + ".estado");
     }
 
     /** Carga el volumen acumulado y el último riego no confirmado tras un reinicio. */
@@ -537,15 +537,15 @@ public final class WM_WS_E {
         Properties p = new Properties();
         p.setProperty("total", Double.toString(totalLitros));
         if (activo != null) {
-            p.setProperty("activeRequest", activo.requestId);
+            p.setProperty("activeRequest", activo.idSolicitud);
             p.setProperty("activeOperator", Integer.toString(activo.operario));
             p.setProperty("activeDuration", Long.toString(activo.duracion));
             p.setProperty("activeStart", Long.toString(activo.inicioMillis));
-            p.setProperty("activeElapsed", Long.toString(activo.elapsedSeconds()));
+            p.setProperty("activeElapsed", Long.toString(activo.segundos()));
             p.setProperty("activeService", Double.toString(activo.servicioLitros));
         }
         if (pendiente != null) {
-            p.setProperty("pendRequest", pendiente.requestId);
+            p.setProperty("pendRequest", pendiente.idSolicitud);
             p.setProperty("pendOperator", Integer.toString(pendiente.operario));
             p.setProperty("pendElapsed", Long.toString(pendiente.segundos));
             p.setProperty("pendService", Double.toString(pendiente.servicio));
@@ -554,7 +554,7 @@ public final class WM_WS_E {
             Path padre = ruta.getParent();
             if (padre != null) Files.createDirectories(padre);
             try (OutputStream out = Files.newOutputStream(ruta)) {
-                p.store(out, "WM_WS_E - estado persistente de la estación " + wsId);
+                p.store(out, "WM_WS_E - estado persistente de la estación " + idWs);
             }
             ultimoGuardado = System.currentTimeMillis();
         } catch (Exception e) {
@@ -607,69 +607,69 @@ public final class WM_WS_E {
     }
 
     /** Datos del motor para la interfaz gráfica. */
-    public static final class EngineView {
-        public final int wsId;
-        public final String location;
-        public final double nominalFlow;
-        public final boolean monitorConnected;
-        public final boolean ko;
-        public final boolean noResponse;
-        public final boolean blocked;
-        public final String state;
-        public final double totalLitres;
-        public final double serviceLitres;
-        public final long elapsedSeconds;
-        public final int operatorId;
-        public final String requestId;
-        public final String pendingRequestId;
+    public static final class VistaMotor {
+        public final int idWs;
+        public final String ubicacion;
+        public final double caudalNominal;
+        public final boolean monitorConectado;
+        public final boolean averia;
+        public final boolean sinRespuesta;
+        public final boolean bloqueada;
+        public final String estado;
+        public final double litrosTotales;
+        public final double litrosServicio;
+        public final long segundos;
+        public final int idOperario;
+        public final String idSolicitud;
+        public final String idSolicitudPendiente;
 
-        EngineView(int wsId, String location, double nominalFlow, boolean monitorConnected,
-                   boolean ko, boolean noResponse, boolean blocked, String state,
-                   double totalLitres, double serviceLitres, long elapsedSeconds,
-                   int operatorId, String requestId, String pendingRequestId) {
-            this.wsId = wsId;
-            this.location = location;
-            this.nominalFlow = nominalFlow;
-            this.monitorConnected = monitorConnected;
-            this.ko = ko;
-            this.noResponse = noResponse;
-            this.blocked = blocked;
-            this.state = state;
-            this.totalLitres = totalLitres;
-            this.serviceLitres = serviceLitres;
-            this.elapsedSeconds = elapsedSeconds;
-            this.operatorId = operatorId;
-            this.requestId = requestId;
-            this.pendingRequestId = pendingRequestId;
+        VistaMotor(int idWs, String ubicacion, double caudalNominal, boolean monitorConectado,
+                   boolean averia, boolean sinRespuesta, boolean bloqueada, String estado,
+                   double litrosTotales, double litrosServicio, long segundos,
+                   int idOperario, String idSolicitud, String idSolicitudPendiente) {
+            this.idWs = idWs;
+            this.ubicacion = ubicacion;
+            this.caudalNominal = caudalNominal;
+            this.monitorConectado = monitorConectado;
+            this.averia = averia;
+            this.sinRespuesta = sinRespuesta;
+            this.bloqueada = bloqueada;
+            this.estado = estado;
+            this.litrosTotales = litrosTotales;
+            this.litrosServicio = litrosServicio;
+            this.segundos = segundos;
+            this.idOperario = idOperario;
+            this.idSolicitud = idSolicitud;
+            this.idSolicitudPendiente = idSolicitudPendiente;
         }
     }
 
     private static final class Riego {
-        final String requestId;
+        final String idSolicitud;
         final int operario;
         final long duracion;
         final long inicioMillis = System.currentTimeMillis();
         double servicioLitros;
 
-        Riego(String requestId, int operario, long duracion) {
-            this.requestId = requestId;
+        Riego(String idSolicitud, int operario, long duracion) {
+            this.idSolicitud = idSolicitud;
             this.operario = operario;
             this.duracion = duracion;
         }
 
-        long elapsedSeconds() {
+        long segundos() {
             return Math.max(0, (System.currentTimeMillis() - inicioMillis) / 1000L);
         }
     }
 
     private static final class Pendiente {
-        final String requestId;
+        final String idSolicitud;
         final int operario;
         final long segundos;
         final double servicio;
 
-        Pendiente(String requestId, int operario, long segundos, double servicio) {
-            this.requestId = requestId;
+        Pendiente(String idSolicitud, int operario, long segundos, double servicio) {
+            this.idSolicitud = idSolicitud;
             this.operario = operario;
             this.segundos = segundos;
             this.servicio = servicio;

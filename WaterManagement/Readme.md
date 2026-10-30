@@ -65,6 +65,11 @@ siempre. Los Dockerfiles y `docker-compose.yml` ya fijan `WM_GUI=false`.
 - El motor confirma mediante `POLL#1#<requestId>` / respuesta `STATUS` (petición-respuesta,
   sin ACK duplicado).
 - Las órdenes se anexan a la respuesta del estado como `ACK#STATUS#OK#CMD#TIPO|requestId|operario|duracion#...`.
+- Kafka (FO ↔ CENTRAL): `wm.riego.solicitudes` (`RIEGO_REQUEST`, `LIST_AVAILABLE_WS`,
+  `CONSULTAR_ESTADO`) y `wm.riego.respuestas` (`RIEGO_EVENT`, `AVAILABLE_WS_LIST`). Con
+  `CONSULTAR_ESTADO` el operario recupera el resultado de un riego que quedó pendiente
+  tras cerrarse durante el servicio; CENTRAL responde con el evento terminal guardado o
+  con el estado actual de la solicitud.
 
 ## Configuración
 
@@ -184,3 +189,5 @@ WaterManagement/
 3. Resiliencia: monitor caido -> Disconnected; motor KO -> Leak y aborto del riego;
    recuperacion -> Available con volumen conservado; bloqueo -> Out of Service; activacion.
 4. Caida del motor durante un riego -> fuga -> reinicio conserva el volumen acumulado.
+5. Caida del FO durante un riego -> el riego continúa y, al reiniciar el operario, se
+   recupera y muestra el resultado final (`CONSULTAR_ESTADO` + fichero de pendientes).

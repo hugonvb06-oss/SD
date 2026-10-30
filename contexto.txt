@@ -1,0 +1,138 @@
+SD 26/27 -::- WaterManagement. Release 1: Guía de Corrección 
+Página 1 de 3 
+Guía de corrección 
+Nombre de los estudiantes:  
+Grupo de prácticas :  
+Nota final: 
+A rellenar por el profesor 
+************** LEER DETENIDAMENTE ************** 
+Para la corrección de las prácticas, estos son los apartados y valoraciones que se tendrán en cuenta. El estudiante deberá 
+entregar este documento impreso a doble cara y cumplimentado el día de la corrección, indicando en la columna “E.” 
+(referente a Estudiante) si el estudiante cumple con el requerimiento. El profesor validará si los cumple o no en la 
+columna “P.”. Para poder realizar la evaluación, el día de la corrección, el estudiante deberá llegar con la parte Cloud 
+(Railway) totalmente desplegada y en funcionamiento, y desplegar en los laboratorios el escenario indicado en la 
+especificación de la práctica. 
+Cada estudiante debe ser capaz de explicar el código fuente y responder a las preguntas que el profesor haga a tal 
+propósito (Este requerimiento es indispensable para poder ser evaluado). 
+Este escenario debe ser puesto en marcha delante del profesor lanzando cada uno de los procesos y componentes 
+necesarios, coincidiendo con los pasos detallados en la memoria que cada estudiante debe entregar. 
+Concepto a evaluar E. P. 
+Despliegue, modularidad y escalabilidad (2 puntos) 
+El sistema se despliega correctamente según se determina en la especificación de la práctica y se ha 
+comentado en clase: la parte Cloud (WM_Central, Kafka y SQLite) llega ya desplegada y en 
+funcionamiento en Railway o AwS. En el laboratorio se despliegan los módulos WM_FO y WM_WS 
+Todos se despliegan sin necesidad de usar los entornos de compilación (IDE) para su corrección.  
+  
+El código se encuentra en GitHub (UA_SD) con la estructura común (carpetas WM_Central, WM_WS y 
+WM_FO, prompts, y ficheros Readme.md y Nombres.txt) y con acceso concedido al profesor.  
+  
+Es posible desplegar tantas instancias del mismo módulo como se requiera en distintas máquinas o en 
+la misma a criterio del profesor. Así, por ejemplo, se podrán desplegar tantas WS o Field Operators (FO) 
+como el profesor solicite. En cualquier momento durante la corrección, se puede requerir desplegar 
+una instancia nueva o parar otra súbitamente simulando un “crash” de un determinado módulo. 
+  
+Funcionamiento base (hasta 3 puntos) 
+Se pueden parametrizar distintos aspectos de la solución en cada uno de los módulos evitando que 
+dichos parámetros se encuentren definidos de forma fija en el código. Así será posible parametrizar los 
+puertos de servidores o IP o puertos a las que cada módulo debe conectarse, cualquier otro parámetro 
+que el estudiante considere necesario para la ejecución de su solución. El código no podrá volver a 
+compilarse en ningún momento de corrección de la práctica salvo petición expresa del profesor. 
+  
+La aplicación no falla durante el transcurso normal de una ejecución y cumple con la funcionalidad 
+prevista. El módulo WM_Central arrancará y estará preparado para atender cuantas WS o FO soliciten 
+sus distintas actividades.  
+  
+Todo el sistema se inicia y se desarrolla sin incidencias. En este punto NO hay interacción ninguna del 
+alumno ni profesor. Simplemente se ejecuta toda la solución con sus distintos módulos y mediante la 
+observación de lo que se muestra en las distintas terminales de WM_Central, FO y WS se puede validar 
+perfectamente lo que ocurre en todo el sistema. 
+  
+SD 26/27 -::- WaterManagement. Release 1: Guía de Corrección 
+Página 2 de 3 
+Concepto a evaluar E. P. 
+Ante cualquier ejecución o reinicio, WM_Central consulta su base de datos SQLite y muestra las WS ya 
+registradas (con su ubicación). Hasta que una WS conecta con WM_Central, esta la muestra como 
+Desconectada. 
+  
+El panel de WM_Central muestra, para cada WS, su ID, ubicación (parque o jardín), cantidad de agua 
+suministrada y estado, con los colores especificados: Available (VERDE), Watering (VERDE parpadeante 
+o similar, con caudal en L/min, volumen acumulado en L e ID del operario), Leak (ROJO), Out of Service 
+(NARANJA, con la leyenda “Out of Service”) y Disconnected (GRIS). 
+  
+Todos los módulos implementan las funcionalidades especificadas en la práctica: registro y 
+autenticación de una WS con aceptación o denegación (p. ej., WS no registrada), validación de la 
+disponibilidad de la WS y aceptación o denegación de un riego solicitado por un FO, envío de mensajes 
+desde la central a las WS para iniciar, bloquear o activar, etc. Los efectos sobre el ecosistema de todas 
+las acciones se pueden observar en pantalla sin dificultad con un interfaz adecuado en todas las 
+aplicaciones. En ningún caso se puede perder ninguna transacción pase lo que pase. 
+  
+Los riegos pueden controlarse desde WM_FO, desde un menú de la propia WS o incluso en 
+WM_Central.  
+  
+WM_Central dispone de opciones para enviar, de forma arbitraria, a una o a todas las WS: iniciar un 
+riego, bloquear la WS (finaliza cualquier riego en curso y pasa a NARANJA “Out of Service”) o activarla 
+(vuelve a VERDE). 
+  
+Monitor y Engine: el monitor se autentica en WM_Central y envía cada segundo un mensaje de 
+comprobación de salud al engine. Si el engine no responde o responde KO (se pulsa una tecla en el 
+engine en tiempo de ejecución para simularlo), el monitor notifica la fuga a WM_Central y la WS pasa 
+a Leak (ROJO). Si la fuga se produce durante un riego, este finaliza inmediatamente informando a todos 
+los módulos. Al resolverse la fuga, la WS vuelve a estar disponible. Toda la información es visible en 
+WM_Central y en el monitor de la WS. 
+  
+Los operarios solo reciben los mensajes de la WS que les está proporcionando el riego, pero pueden 
+ver todas las WS disponibles.  
+  
+Los servidores son todos concurrentes y están disponibles para recibir peticiones en todo momento.   
+Resiliencia (hasta 3 puntos) (Solo evaluable si el funcionamiento base es correcto) 
+Cualquier fallo en cualquier componente solo invalida el servicio proporcionado por ese componente. 
+El resto de los componentes del sistema pueden seguir con su operativa normal salvo en lo que se vea 
+afectado por el componente caído.  
+  
+Casos específicos (no exhaustivos) a controlar en los que se paran o desaparecen abruptamente (Ctrl+C 
+o cierre súbito de la terminal o ventana donde se ejecuta) los siguientes módulos: - Un Monitor de una WS (WM_WS_M): WM_Central marcará la WS como “Desconectada”. Si 
+hubiera un riego en marcha este finalizará salvo que el WS_E (Engine) también hubiera caído. La 
+WS no admitirá más riegos ni siquiera manualmente y mostrará un mensaje como “Averiada”. - Un WS_Engine (WM_WS_E): El monitor (si no está caído) enviará una señal de avería a WM_Central 
+la cual procederá a marcarla como averiada y, en su caso, enviará un mensaje al FO al que se le 
+estuviera prestando el servicio. La WS no puede perder lo que ya se haya regado y, cuando se 
+recupere (se resuelva la avería), debe ser capaz de enviar el estado final del riego realizado. - Un FO se cierra mientras se le está prestando un servicio: El riego sigue su curso. Cuando el 
+operario se recupera verá el resultado de su servicio. - WM_Central: Las WS siguen prestando su servicio hasta que lo finalicen, momento en el cual se 
+paran si la central no se ha restaurado. No será posible admitir nuevas peticiones de riego.  
+  
+Nota: El Monitor es el encargado de decirle a Central el estado de la WS. Para mayor claridad la tabla 
+de estados del Monitor y Engine sería: 
+Monitor_OK and Engine_OK => Available (Verde) 
+Monitor_OK and Engine_KO (Caído) => Averiado (Rojo) 
+Monitor_KO (caído) and Engine_OK => Desconectado 
+Monitor_KO (caído) and Engine_KO (Caído) => Desconectado 
+El estado desconectado se produce cuando Central NO recibe ningún mensaje de vida desde Monitor. 
+  
+SD 26/27 -::- 
+WaterManagement. Release 1: Guía de Corrección 
+Concepto a evaluar 
+El sistema se recupera de forma correcta cuando se restituye el servicio de cualquier componente caído 
+debiendo reiniciarse el mínimo número de módulos del sistema. La inclusión de nuevas instancias de 
+cada módulo (nuevos FO, nuevas WS) no produce fallos. 
+E. 
+P. 
+Se capturan los errores derivados de cualquier caída y se muestran al usuario de forma controlada 
+en todos los interfaces donde aplique. Ej.: Si WM_Central está fuera de servicio o cae durante un 
+riego, los FO o la WS visualizarán un error del tipo “Imposible conectar con WM_Central”. 
+General (hasta 2 puntos) 
+Entrega de la memoria (Informe de desarrollo, detalle de despliegue, resultados).   
+Diseño, confort, interfaces, acabado profesional.   
+Otros aspectos técnicos reseñables por el estudiante. Ejemplos: - 
+Establecimiento de mecanismos adicionales de resiliencia como dos centrales o dos brokers. - 
+Se ha implementado correctamente el protocolo de intercambio de mensajes en los sockets basado 
+en tramas bien formadas <stx>D<etx><lrc>. 
+**** CONSIDERACIONES IMPORTANTES *** 
+Nota: Es obligatorio desplegar todo el escenario, no se corregirán componentes independientes. LA PRÁCTICA NO ES 
+EVALUABLE si no se logra desplegar el escenario mínimo (parte Cloud en Railway o AwS más, al menos, dos equipos  
+físicos o virtuales, con los módulos WM_FO y WM_WS), con todos los componentes conectados e interactuando 
+adecuadamente. 
+Uso responsable de la IA: Los prompts utilizados se encuentran incluidos en el repositorio de GitHub y compartidos con 
+el profesorado, y el estudiante demuestra comprender el código generado con apoyo de IA. El profesor puede pedir en 
+cualquier momento explicaciones del código. Si los alumnos no son capaces de responder adecuadamente puede 
+conllevar el suspenso automático de la práctica. 
+Importante: Un despliegue incorrecto puede penalizar el resto de los apartados de la corrección. 
+Página 3 de 3 
