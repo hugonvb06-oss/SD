@@ -1,0 +1,5 @@
+# Formato propuesto: id_de_WS;duracion_en_segundos
+# Cada riego se procesa secuencialmente y hay una pausa de 4 segundos entre servicios.
+1;30
+2;45
+3;60
