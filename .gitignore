@@ -2,6 +2,7 @@
 target/
 out/
 bin/
+contexto.txt
 *.class
 *.log
 *.db
