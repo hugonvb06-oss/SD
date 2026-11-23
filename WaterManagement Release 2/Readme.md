@@ -191,3 +191,40 @@ WaterManagement/
 4. Caida del motor durante un riego -> fuga -> reinicio conserva el volumen acumulado.
 5. Caida del FO durante un riego -> el riego continúa y, al reiniciar el operario, se
    recupera y muestra el resultado final (`CONSULTAR_ESTADO` + fichero de pendientes).
+
+## Release 2 — Nuevos módulos
+
+Además de la base de la Release 1, este repositorio añade los componentes de la segunda
+fase (SOA + REST + seguridad):
+
+- **WM_Registry** (`WM_Registry/`): alta/baja/autenticación de WS por API REST (Maven).
+- **WM_W** (`WM_W/`): Weather Control Office; consulta OpenWeather cada 4 s (Maven).
+- **WM_API_Central** (`WM_API_Central/`): API REST que lee la SQLite compartida y expone el
+  estado del sistema, y recibe las alertas de WM_W.
+- **Front** (`Front/`): página web (Node.js + Express) que consulta `WM_API_Central` por HTTP.
+
+### WM_API_Central
+
+| Método | Ruta | Descripción |
+|---|---|---|
+| GET | `/api/estaciones` | WS registradas (id, ubicación, estado, litros, última conexión) |
+| GET | `/api/operarios` | operarios (FO) |
+| GET | `/api/riegos` | riegos en curso |
+| GET | `/api/clima` | alertas climáticas (tabla `AlertaClima`) |
+| GET | `/api/resumen` | agregado de todo (para el dashboard) |
+| PUT | `/api/alerta` | WM_W notifica una alerta o su cancelación |
+
+Parámetros: `WM_API_PORT` (8080), `WM_DB_PATH` (database/watermanagement.db).
+
+### Front
+
+Dashboard con el estado de las WS (colores), operarios, riegos en curso y clima/alertas.
+Se actualiza cada 3 s y permite cambiar la API con `?api=http://IP:puerto`.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+powershell -ExecutionPolicy Bypass -File scripts\run.ps1 api-central 8080
+cd Front
+npm install
+npm start        # http://localhost:3000
+```

@@ -191,38 +191,3 @@ WaterManagement/
 4. Caida del motor durante un riego -> fuga -> reinicio conserva el volumen acumulado.
 5. Caida del FO durante un riego -> el riego continúa y, al reiniciar el operario, se
    recupera y muestra el resultado final (`CONSULTAR_ESTADO` + fichero de pendientes).
-
-## Release 2 — Front, API_Central y HTTP (en desarrollo)
-
-### API_Central (`WM_API_Central/`)
-
-Servicio REST (JDK, sin dependencias extra más allá de `lib/`) que lee la misma SQLite
-que WM_Central y la expone al Front y a WM_W:
-
-- `GET /api/estaciones` → WS registradas (id, ubicación, estado, litros, última conexión).
-- `GET /api/operarios` → operarios (FO).
-- `GET /api/riegos` → riegos en curso.
-- `GET /api/clima` → alertas climáticas (tabla `AlertaClima`).
-- `GET /api/resumen` → agregado de todo lo anterior (para el dashboard).
-- `PUT /api/alerta` → WM_W notifica una alerta climática o su cancelación
-  (`{"ciudad","alerta","motivo","temperatura","lluvia"}`). Se guarda en SQLite y,
-  si `WM_ALERT_KAFKA=true`, se publica en el topic `wm.central.alertas`.
-
-Parámetros: `WM_API_PORT` (8080), `WM_DB_PATH` (database/watermanagement.db).
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run.ps1 api-central 8080 database\watermanagement.db
-```
-
-### Front (`Front/`)
-
-Página web (Node.js + Express) que consulta `API_Central` por HTTP (`fetch`) y muestra el
-dashboard: estado de las WS con colores, operarios, riegos en curso y clima/alertas.
-Se actualiza cada 3 s y admite cambiar la URL de la API con `?api=http://IP:puerto`.
-
-```bash
-cd WaterManagement/Front
-npm install
-npm start                # http://localhost:3000  (o WM_FRONT_PORT)
-```
