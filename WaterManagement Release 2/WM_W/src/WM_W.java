@@ -67,8 +67,8 @@ public final class WM_W {
         }
 
         Path citiesFile = Paths.get(env("WM_W_CITIES_FILE", "config/cities.json")).toAbsolutePath().normalize();
-        String centralBaseUrl = env("WM_API_CENTRAL_URL", "http://localhost:8081").trim();
-        String centralAlertPath = env("WM_API_CENTRAL_ALERT_PATH", "/api/weather/alerts").trim();
+        String centralBaseUrl = env("WM_API_CENTRAL_URL", "http://localhost:8080").trim();
+        String centralAlertPath = env("WM_API_CENTRAL_ALERT_PATH", "/api/alerta").trim();
 
         try {
             OpenWeatherClient openWeather = new OpenWeatherClient(apiKey);
@@ -152,8 +152,8 @@ public final class WM_W {
                             break;
                         case "5":
                             System.out.println("Intervalo configurado: " + env("WM_WEATHER_INTERVAL_MS", "4000") + " ms");
-                            System.out.println("API_Central: " + env("WM_API_CENTRAL_URL", "http://localhost:8081")
-                                    + env("WM_API_CENTRAL_ALERT_PATH", "/api/weather/alerts"));
+                            System.out.println("API_Central: " + env("WM_API_CENTRAL_URL", "http://localhost:8080")
+                                    + env("WM_API_CENTRAL_ALERT_PATH", "/api/alerta"));
                             System.out.println("Las consultas y notificaciones siguen ejecutandose en segundo plano.");
                             break;
                         case "0":
@@ -449,22 +449,14 @@ public final class WM_W {
         }
 
         private boolean notify(WeatherLocation location, WeatherReading reading, boolean active) {
+            // Contrato real de API_Central (ApiCentral.java): PUT /api/alerta
+            // { ciudad, alerta, motivo, temperatura, lluvia }
             Map<String, Object> event = new LinkedHashMap<>();
-            event.put("source", "WM_W");
-            event.put("action", active ? "ALERT" : "CLEAR");
-            event.put("alertActive", active);
-            event.put("location", location.getQuery());
-            event.put("city", location.getName());
-            event.put("country", location.getCountry());
-            event.put("latitude", location.getLatitude());
-            event.put("longitude", location.getLongitude());
-            event.put("temperatureC", reading.temperatureC);
-            event.put("rain", reading.rain);
-            event.put("rainMmLastHour", reading.rainMmLastHour);
-            event.put("weatherMain", reading.weatherMain);
-            event.put("description", reading.description);
-            event.put("reason", reading.reason);
-            event.put("observedAt", reading.observedAt);
+            event.put("ciudad", location.getQuery());
+            event.put("alerta", active);
+            event.put("motivo", active ? reading.reason : "NONE");
+            event.put("temperatura", reading.temperatureC);
+            event.put("lluvia", reading.rain);
 
             try {
                 String body = JSON.writeValueAsString(event);
@@ -472,7 +464,7 @@ public final class WM_W {
                         .timeout(Duration.ofSeconds(7))
                         .header("Content-Type", "application/json; charset=utf-8")
                         .header("Accept", "application/json")
-                        .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
+                        .PUT(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                         .build();
                 HttpResponse<String> response = client.send(request,
                         HttpResponse.BodyHandlers.ofString(StandardCharsets.UTF_8));
