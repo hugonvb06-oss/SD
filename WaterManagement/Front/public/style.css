@@ -1,0 +1,152 @@
+:root {
+  --fondo: #14161a;
+  --panel: #1e2228;
+  --borde: #2c313a;
+  --texto: #eaeef2;
+  --atenuado: #9aa4b0;
+  --verde: #2e7d32;
+  --verde-claro: #4caf50;
+  --rojo: #c62828;
+  --naranja: #ef6c00;
+  --gris: #616161;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--fondo);
+  color: var(--texto);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+.cabecera {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 22px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--borde);
+}
+
+.cabecera h1 { margin: 0; font-size: 1.4rem; }
+
+.estado-conexion { display: flex; align-items: center; gap: 14px; }
+
+.estado { font-weight: 600; }
+.estado.ok { color: var(--verde-claro); }
+.estado.error { color: var(--rojo); }
+
+.reloj { color: var(--atenuado); font-size: 0.85rem; }
+
+.error-caja {
+  margin: 14px 22px 0;
+  padding: 10px 14px;
+  background: #3a1d1d;
+  border: 1px solid var(--rojo);
+  border-radius: 6px;
+  color: #ffd2d2;
+}
+
+.oculto { display: none; }
+
+main { padding: 18px 22px 8px; }
+
+.seccion { margin-bottom: 22px; }
+.seccion h2 {
+  margin: 0 0 12px;
+  font-size: 1.05rem;
+  color: var(--atenuado);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.grid-estaciones {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 14px;
+}
+
+.tarjeta {
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  padding: 14px 16px;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.tarjeta .id { font-weight: 700; font-size: 1.1rem; }
+.tarjeta .ubicacion { font-size: 0.85rem; opacity: 0.9; }
+.tarjeta .estado { font-weight: 700; font-size: 1.05rem; }
+.tarjeta .meta { font-size: 0.8rem; opacity: 0.85; }
+
+.estado-ACTIVADA, .tarjeta.ACTIVADA { background: var(--verde); }
+.estado-REGANDO, .tarjeta.REGANDO { background: var(--verde-claro); animation: parpadeo 1s infinite; }
+.estado-FUGA, .tarjeta.FUGA { background: var(--rojo); }
+.estado-FUERA_SERVICIO, .tarjeta.FUERA_SERVICIO { background: var(--naranja); }
+.estado-DESCONECTADA, .tarjeta.DESCONECTADA { background: var(--gris); }
+
+@keyframes parpadeo {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+.columnas {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 18px;
+}
+
+@media (max-width: 720px) {
+  .columnas { grid-template-columns: 1fr; }
+}
+
+.tabla {
+  width: 100%;
+  border-collapse: collapse;
+  background: var(--panel);
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.tabla th, .tabla td {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--borde);
+  font-size: 0.9rem;
+}
+
+.tabla th { color: var(--atenuado); text-transform: uppercase; font-size: 0.75rem; }
+
+.grid-clima {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 14px;
+}
+
+.clima-card {
+  background: var(--panel);
+  border: 1px solid var(--borde);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.clima-card.alerta { border-color: var(--rojo); background: #3a1d1d; }
+.clima-card.ok { border-color: var(--verde); }
+
+.clima-card .ciudad { font-weight: 700; }
+.clima-card .detalle { font-size: 0.85rem; color: var(--atenuado); }
+.clima-card .badge { display: inline-block; margin-top: 6px; padding: 2px 8px; border-radius: 4px; font-size: 0.75rem; font-weight: 700; }
+.clima-card .badge.alerta { background: var(--rojo); color: #fff; }
+.clima-card .badge.ok { background: var(--verde); color: #fff; }
+
+.vacio { color: var(--atenuado); font-style: italic; }
+
+.pie {
+  padding: 12px 22px 18px;
+  color: var(--atenuado);
+  font-size: 0.8rem;
+}

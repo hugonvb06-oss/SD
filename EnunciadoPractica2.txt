@@ -1,0 +1,441 @@
+================================================================================
+
+SD -::- Práctica Water Management :: - Curso 26/27
+
+Release 2
+
+================================================================================
+
+
+
+[Página 1]
+
+
+
+| SD | Sistemas Distribuidos |
+
+| 26/27 | Práctica no guiada: Seguridad y API Rest |
+
+| | Water Management |
+
+
+
+Preámbulo
+
+---------
+
+El objetivo de esta segunda fase (Release 2) es que los estudiantes implementen, dentro de los principios de arquitectura SOA (Service Oriented Architecture), la tecnología de comunicación basada en servicios REST, además de integrar aspectos fundamentales de seguridad vistos en teoría.
+
+
+
+Para ello, se consumirán APIs REST de terceros (información meteorológica) y se desarrollará y expondrá una API REST propia desde el backend para ser consumida por un frontend web y otros módulos del sistema. Adicionalmente, se implementarán tres pilares de seguridad: cifrado de canal, autenticación segura y principios de auditoría. Se partirá del sistema base desarrollado en la Release 1 de la red Water Management.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 2]
+
+
+
+Especificación
+
+--------------
+
+
+
+Descripción funcional:
+
+La funcionalidad base será idéntica a la implementada en la Release 1, incorporando las siguientes ampliaciones:
+
+
+
+1- Nuevo módulo meteorológico (WM_W - Weather Control Office): Determinará la viabilidad de regar en las zonas donde se ubican las estaciones de riego (WS). Se comunicará vía API con un proveedor externo (OpenWeather) para suspender el riego si llueve o hay heladas.
+
+2- Nuevo módulo de registro (WM_Registry): Permitirá a las estaciones de riego (WS) darse de alta o baja en el sistema mediante una API REST, obteniendo de forma segura sus credenciales de acceso.
+
+3- Módulo Web (Front): Se creará una aplicación web pública que consumirá una nueva API (API_Central) para mostrar el panel de control (Dashboard) de la CENTRAL desde cualquier navegador.
+
+
+
+Mecanismos de Seguridad:
+
+* Autenticación segura: Canal cifrado para la comunicación entre los WS y el WM_Registry.
+
+* Cifrado de datos: Cifrado simétrico de los mensajes intercambiados a través de sockets o colas entre la Central y los WS.
+
+* Auditoría: Registro estructurado de eventos de seguridad y operacionales en la Central.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 3]
+
+
+
+Diseño técnico
+
+--------------
+
+Partiendo de la arquitectura implementada en la primera fase, se ampliará el ecosistema para integrar los nuevos componentes:
+
+
+
+[Figura 1. Esquema conceptual del Sistema software, interconexiones entre los componentes y tipos de interfaces]
+
+Descripción detallada del diagrama:
+
+- Componentes a desarrollar por el estudiante (marcados con *):
+
+  * Release 1: CENTRAL (WM_Central), Operator App 1..n (WM_FO 1..n), Watering Station 1..n (WS 1..n) compuesta internamente por Monitor y Engine conectados por Sockets.
+
+  * Release 2: Front, WM_Registry, API Central / API_Central, Weather Control Office (WM_W).
+
+- Componentes Market as-is (de mercado):
+
+  * BD SQLite (conectada a WM_Registry, API Central y CENTRAL).
+
+  * Queues and event Manager.
+
+- Core System (agrupa a):
+
+  * WM_Registry, API Central, CENTRAL (WM_Central), API_Central y BD SQLite.
+
+- Flujos e Interconexiones (Integration Technology to be used):
+
+  * Browser <--> Front: Http Request.
+
+  * Front <--> API Central: API Rest (Release 2).
+
+  * WM_Registry <--> Monitor (en WS 1..n): API Rest (Release 2).
+
+  * CENTRAL (WM_Central) <--> Monitor (en WS 1..n): Sockets (Status & Autentication) (Release 1).
+
+  * CENTRAL (WM_Central) <--> Queues and event Manager: Streaming & QM (Release 1).
+
+  * CENTRAL (WM_Central) <--> Engine (en WS 1..n): Comunicación punteada directa.
+
+  * Queues and event Manager <--> Engine (en WS 1..n): Streaming & QM (Release 1).
+
+  * Queues and event Manager <--> Operator App 1..n (WM_FO 1..n): Streaming & QM (Release 1).
+
+  * API_Central <--> Weather Control Office (WM_W): API Rest (Release 2).
+
+  * Weather Control Office (WM_W) <--> OpenWeather: API Rest (Release 2).
+
+
+
+Al igual que en la primera parte de la práctica, los componentes pueden ser desarrollados en el lenguaje de preferencia del estudiante: Java, C/C++, .NET, Python, etc. asumiendo el estudiante la responsabilidad de su conocimiento y forma de desplegarlo en el laboratorio.
+
+
+
+Registry (WM_Registry) - [Core System]:
+
+WM_Registry será el módulo mediante el cual las estaciones desde WM_WS_M (Monitor) pueden darse de alta o baja en el sistema. Dispondrá de las opciones de alta, baja y autenticación de una WS. Las WS, previo a su autenticación y posterior prestación de servicios, deberán realizar una petición de alta para registrar su ID y localización. Sin este proceso no podrán autenticarse; ante un intento sin registro, recibirán una denegación de WM_Central.
+
+* El mecanismo se realizará mediante un API_Rest que implementará los métodos oportunos (GET, PUT, DELETE, ...).
+
+* La comunicación entre WM_Registry y WM_WS_M deberá realizarse mediante el establecimiento de un canal seguro (HTTPS, SSL, RSA, ...).
+
+  - Opcional: La identificación de las WS podrá realizarse en base a un certificado (autofirmado) que contenga los datos identificativos.
+
+* En respuesta al registro, WM_Registry devolverá las claves (credenciales) que la WS deberá usar durante su autenticación en WM_Central.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 4]
+
+
+
+CENTRAL (WM_Central):
+
+Será idéntico al ya realizado en la primera parte con las siguientes modificaciones:
+
+
+
+1. Consumo de API_Rest de WM_W: WM_Central expondrá una interfaz (API) para que el módulo WM_W le informe si la localización de una WS tiene una climatología adecuada (sin temperaturas de congelación o lluvia). Ante una alerta, WM_W notificará a WM_Central.
+
+2. Autenticación entre WM_Central y las WS: Las WS deberán autenticarse en WM_Central con las credenciales proporcionadas por el Registry. Si la autenticación se resuelve con éxito, la central devolverá a WM_WS_M la clave de cifrado simétrico ÚNICA POR WS que deberá ser usada para el cifrado de todos los mensajes enviados a la Central.
+
+   - Estas claves podrán ser revocadas por WM_Central ante una supuesta vulnerabilidad. Se implementará una opción en la Central para restaurar claves. Al pulsarla, se borrarán las claves de una WS específica, la cual quedará fuera de servicio. Esto obligará a WM_WS_M a realizar una nueva autenticación mediante una opción incorporada en el mismo para obtener sus nuevas claves.
+
+   - Opcional: Aunque la autenticación sigue siendo por sockets, el alumno podrá implementar un API Rest entre WS y Central a tal propósito.
+
+3. Cifrado en el canal entre WM_Central y las WS (Engine): Se establecerá un sistema de cifrado simétrico (elegible y justificado por el estudiante) en el canal de colas o sockets para evitar ataques MITM (Man In The Middle). Todos los mensajes estarán cifrados.
+
+   - Nota opcional: Kafka dispone de 3 componentes de seguridad (Cifrado SSL/TLS, Autenticación SSL/SASL y Autorización ACL). Su incorporación será valorada positivamente.
+
+4. Registro de Auditoría: Se implementará un log de todos los eventos de forma estructurada:
+
+   - Fecha y hora del evento.
+
+   - Quién y desde dónde se produce el evento (IP de la WS, IP del operario FO).
+
+   - Qué acción se realiza: Autenticaciones fallidas/exitosas, incidencias (fugas), cambio de situación de la WS, bloqueos, errores, etc.
+
+   - Parámetros o descripción del evento.
+
+
+
+API_Central:
+
+Este componente expondrá un API_Rest (GET, PUT, DELETE, ...) que permitirá consultar el estado de los operarios (FO), las WS y los riegos en curso. Permitirá también ser consumido por WM_W para notificar situaciones de alerta climática o su cancelación.
+
+
+
+Monitor (WM_WS_M):
+
+Implementará una nueva opción (disponible en un menú) para conectarse a WM_Registry, registrarse de forma segura y recibir su clave de autenticación. La conexión y autenticación deberá realizarse de forma segura evitando la exposición en claro de los datos de identificación del CP. Durante la autenticación posterior con la Central, recibirá la clave para el cifrado simétrico que el WM_WS_E (Engine) deberá usar.
+
+
+
+Weather Control Office (WM_W):
+
+Determinará la viabilidad de operación de una WS en función al clima de su localización.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 5]
+
+
+
+* Mediante una opción de menú o un archivo, se podrán introducir/modificar manualmente las ciudades donde se encuentran las WS a efectos de simulación en tiempo real sin reiniciar el sistema.
+
+* Cada 4 segundos, se conectará a OPENWEATHER para consultar el clima.
+
+* Si la temperatura baja de 0ºC (o llueve), notificará la alerta a WM_Central vía API_Central. La Central enviará un mensaje de parada a la WS. Si se está realizando un riego, el mismo finalizará con normalidad y posteriormente la WS pasará a modo "fuera de servicio".
+
+* Cuando el clima vuelva a ser favorable, WM_W notificará la cancelación de la alerta y la WS se restaurará.
+
+
+
+Nota: A efectos de la corrección, cualquier localización podrá ser cambiada a voluntad del profesor en cualquier momento mediante la opción de menú mencionada, sin necesidad de reiniciar ninguna parte del sistema.
+
+
+
+Front:
+
+Consistirá en una simple página web que, haciendo peticiones al API_Central, muestre el cuadro de monitorización de la Central. Debe visualizar claramente el estado de las WS (registro, activación, token), operarios, mensajes de error, mensajes de WM_W, clima y alertas. Nota: Se recomienda, por su sencillez, el uso de Node.js.
+
+
+
+Field Operators (WM_FO):
+
+No cambian su funcionalidad respecto de la entrega anterior. No es necesario que implementen mecanismos de cifrado con la Central.
+
+
+
+Servidor de Clima (OPEN WEATHER):
+
+Se utilizará la plataforma Open Weather (https://openweathermap.org/). El WM_W solicitará el API key gratuito y consultará el endpoint Current weather data para cada ciudad. Del JSON de respuesta provisto, el sistema analizará la temperatura ("main": {"temp": ...}) u otras condiciones adversas.
+
+Para ello bastará con que el estudiante se registre en la versión FREE, solicite el API key (Get API Key) y realizar una petición para cada ciudad que quiera consultar.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 6]
+
+
+
+[Imagen: Modelos de suscripción de Open Weather - Free Access]
+
+Contenido de la captura:
+
+Free Access:
+
+1. Current weather and forecasts (Free for everyone):
+
+   - 60 API calls/minute, 1,000,000 calls/month
+
+   - Current weather API, 3-hour forecast for 5 days API, Weather Maps - Current weather (5 weather layers), Air Pollution API, Geocoding API [Botón: Get API key]
+
+2. Current, Forecast and Historical data for education (Free for students):
+
+   - Current & Forecasts data: 3,000 API calls/minute, 100,000,000 calls/month (Current weather API, Hourly Forecast 4 days, Daily Forecast 16 days, Weather Maps - History, Current, Forecast weather, 15 weather layers, Air Pollution API, Geocoding API)
+
+   - Historical data: 50,000 calls/day, 1 year archive (History API, Statistical Weather Data API, Accumulated Parameters) [Botón: Learn more]
+
+
+
+De todas las posibilidades que ofrece el API es suficiente con que se acceda a las funcionalidades que se encuentran en los métodos de "Current weather data" como se aprecia en la imagen siguiente. Toda la información al respecto se encuentra disponible en la página web del proveedor (https://openweathermap.org/current):
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 7]
+
+
+
+[Imagen: API Current Weather Data]
+
+Contenido de la captura:
+
+Current weather data
+
+Access current weather data for any location on Earth including over 200,000 cities! We collect and process weather data from different sources such as global and local weather models, satellites, radars and a vast network of weather stations. Data is available in JSON, XML, or HTML format.
+
+
+
+Call current weather data for one location - By city name
+
+You can call by city name or city name, state code and country code. Please note that searching by states available only for the USA locations.
+
+
+
+API call:
+
+api.openweathermap.org/data/2.5/weather?q={city name}&appid={API key}
+
+api.openweathermap.org/data/2.5/weather?q={city name},{state code}&appid={API key}
+
+api.openweathermap.org/data/2.5/weather?q={city name},{state code},{country code}&appid={API key}
+
+
+
+El JSON de respuesta de las peticiones que se muestran en la anterior imagen es el siguiente del cual solo necesitaremos la temperatura.
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 8]
+
+
+
+[Imagen: JSON de respuesta del request al API Current Weather Data]
+
+Example of API response:
+
+{
+
+  "coord": {
+
+    "lon": -122.08,
+
+    "lat": 37.39
+
+  },
+
+  "weather": [
+
+    {
+
+      "id": 300,
+
+      "main": "Clear",
+
+      "description": "clear sky",
+
+      "icon": "01d"
+
+    }
+
+  ],
+
+  "base": "stations",
+
+  "main": {
+
+    "temp": 282.55,          <-- Temperatura en °K
+
+    "feels_like": 281.86,
+
+    "temp_min": 280.37,
+
+    "temp_max": 284.26,
+
+    "pressure": 1023,
+
+    "humidity": 100
+
+  },
+
+  "visibility": 16093,
+
+  "wind": {
+
+    "speed": 1.5,
+
+    "deg": 350
+
+  },
+
+  "clouds": {
+
+    "all": 1
+
+  },
+
+  "dt": 1560350645,
+
+  "sys": {
+
+    "type": 1,
+
+    "id": 5122,
+
+    "message": 0.0139,
+
+    "country": "US",
+
+    "sunrise": 1560343627,
+
+    "sunset": 1560396563
+
+  },
+
+  "timezone": -25200,
+
+  "id": 420006353,
+
+  "name": "Mountain View",     <-- Ciudad
+
+  "cod": 200
+
+}
+
+
+
+Guía mínima de despliegue
+
+-------------------------
+
+A diferencia del entorno completamente local del año pasado, esta práctica exige un despliegue mixto para validar la distribución:
+
+
+
+--------------------------------------------------------------------------------
+
+[Página 9]
+
+
+
+* Sistemas en Cloud (RAILWAY / AWS Labs): WM_Central, API_Central, BD SQLite, KAFKA, Front (Web) y WM_Registry.
+
+* PC de Laboratorio 1: Varios Operarios de campo (WM_FO) y la oficina meteorológica (WM_W).
+
+* PC de Laboratorio 2: Varias Estaciones de Riego (WM_WS_M Y WM_WS_E)
+
+
+
+Entregables y Evaluación
+
+------------------------
+
+* Se requerirá desplegar el sistema completo con todos los módulos interconectados. Los apartados de la "Guía de corrección" puntuarán de forma variable; aquello que no pueda comprobarse su funcionamiento no puntuará.
+
+* Se debe entregar una Memoria de prácticas que incluya: Portada, informe descriptivo de los componentes, código fuente, paso a paso detallado de la guía de despliegue, y capturas de pantalla del funcionamiento integrado.
+
+* Si se utilizan asistentes de IA, deberán incluirse los prompts utilizados. Las herramientas deben usarse como apoyo; la falta de dominio absoluto sobre el código entregado supondrá no superar la prueba de evaluación.
+
+* Cada profesor de prácticas podrá solicitar a los estudiantes cualquier otra evidencia que el profesor considere adecuada para poder formalizar la evaluación.
+
+* La fecha de entrega será en la semana del 13/12/2026.

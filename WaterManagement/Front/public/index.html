@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Water Management — Dashboard</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="cabecera">
+    <h1>Water Management</h1>
+    <div class="estado-conexion">
+      <span id="estado" class="estado">Conectando…</span>
+      <span id="reloj" class="reloj"></span>
+    </div>
+  </header>
+
+  <div id="error" class="error-caja oculto"></div>
+
+  <main>
+    <section class="seccion">
+      <h2>Estaciones de riego (WS)</h2>
+      <div id="estaciones" class="grid-estaciones"></div>
+    </section>
+
+    <div class="columnas">
+      <section class="seccion">
+        <h2>Operarios (FO)</h2>
+        <table class="tabla">
+          <thead>
+            <tr><th>ID</th><th>Nombre</th></tr>
+          </thead>
+          <tbody id="operarios"></tbody>
+        </table>
+      </section>
+
+      <section class="seccion">
+        <h2>Riegos en curso</h2>
+        <table class="tabla">
+          <thead>
+            <tr><th>Request</th><th>WS</th><th>Operario</th><th>Dur. (s)</th><th>Estado</th></tr>
+          </thead>
+          <tbody id="riegos"></tbody>
+        </table>
+      </section>
+    </div>
+
+    <section class="seccion">
+      <h2>Clima y alertas (WM_W)</h2>
+      <div id="clima" class="grid-clima"></div>
+    </section>
+  </main>
+
+  <footer class="pie">
+    Datos servidos por <strong>API_Central</strong> vía HTTP (REST). Se actualiza cada 3 s.
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

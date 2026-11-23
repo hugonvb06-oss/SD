@@ -1,0 +1,12 @@
+{
+  "name": "wm-front",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Frontend web del sistema Water Management (Release 2). Sirve el dashboard y consulta API_Central por HTTP.",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

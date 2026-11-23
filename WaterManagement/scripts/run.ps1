@@ -1,6 +1,6 @@
 param(
     [Parameter(Mandatory=$true, Position=0)]
-    [ValidateSet("central", "fo", "ws-mon", "ws-eng")]
+    [ValidateSet("central", "fo", "ws-mon", "ws-eng", "api-central", "front")]
     [string]$Module,
     [Parameter(Position=1, ValueFromRemainingArguments)]
     [string[]]$RestArgs = @()
@@ -27,5 +27,14 @@ switch ($Module) {
     "ws-eng" {
         $javaArgs = @("-cp", "$ROOT\WM_WS\bin", "WM_WS_E") + $RestArgs
         & $java @javaArgs
+    }
+    "api-central" {
+        $javaArgs = @("-cp", "$ROOT\WM_API_Central\out;$CP", "ApiCentral") + $RestArgs
+        & $java @javaArgs
+    }
+    "front" {
+        # Requiere Node.js instalado y 'npm install' en WaterManagement/Front.
+        Push-Location "$ROOT\Front"
+        try { & node server.js @RestArgs } finally { Pop-Location }
     }
 }
